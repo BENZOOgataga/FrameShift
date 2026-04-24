@@ -1,0 +1,125 @@
+plugins {
+    id 'java'
+    id 'eclipse'
+    id 'idea'
+    id 'net.neoforged.gradle.userdev' version '7.0.165'
+}
+
+version = mod_version
+group = mod_group_id
+
+base {
+    archivesName = mod_id
+}
+
+// Require Java 21 (mandatory for Minecraft 1.21+)
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+// Include generated data resources (created by the 'data' run)
+sourceSets.main.resources { srcDir 'src/generated/resources' }
+
+// Force all ASM dependencies to the same version to avoid module-path vs classpath conflicts
+configurations.all {
+    resolutionStrategy {
+        force 'org.ow2.asm:asm:9.8'
+        force 'org.ow2.asm:asm-commons:9.8'
+        force 'org.ow2.asm:asm-tree:9.8'
+        force 'org.ow2.asm:asm-analysis:9.8'
+        force 'org.ow2.asm:asm-util:9.8'
+    }
+}
+
+runs {
+    configureEach {
+        systemProperty 'forge.logging.markers', 'REGISTRIES'
+        systemProperty 'forge.logging.console.level', 'debug'
+        modSource project.sourceSets.main
+    }
+
+    // Launch the Minecraft client for testing (not needed for a server-only mod, but useful)
+    client { }
+
+    // Launch a local dev server — 'nogui' skips the Swing window
+    server {
+        programArgument '--nogui'
+    }
+
+    // Generate JSON data files (block models, recipes, etc.) — run with: ./gradlew runData
+    data {
+        arguments.addAll '--mod', mod_id,
+            '--all',
+            '--output', file('src/generated/resources/').getAbsolutePath(),
+            '--existing', file('src/main/resources/').getAbsolutePath()
+    }
+}
+
+dependencies {
+    // NeoForge itself — this pulls in the Minecraft + NeoForge API
+    implementation "net.neoforged:neoforge:${neo_version}"
+}
+
+// Substitute placeholders like ${mod_id} in mods.toml with real values at build time
+tasks.named('processResources', ProcessResources) {
+    def replaceProperties = [
+        minecraft_version      : minecraft_version,
+        minecraft_version_range: minecraft_version_range,
+        neo_version            : neo_version,
+        neo_version_range      : neo_version_range,
+        loader_version_range   : loader_version_range,
+        mod_id                 : mod_id,
+        mod_name               : mod_name,
+        mod_version            : mod_version,
+        mod_authors            : mod_authors,
+        mod_description        : mod_description,
+    ]
+    inputs.properties replaceProperties
+    filesMatching(['META-INF/neoforge.mods.toml']) {
+        expand replaceProperties
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+tasks.named('jar', Jar) {
+    manifest {
+        attributes([
+            'Specification-Title'   : mod_id,
+            'Specification-Vendor'  : mod_authors,
+            'Specification-Version' : '1',
+            'Implementation-Title'  : project.name,
+            'Implementation-Version': project.jar.archiveVersion,
+            'Implementation-Vendor' : mod_authors,
+        ])
+    }
+}
+
+// ─── CurseForge publishing ────────────────────────────────────────────────────
+// To publish: set CURSEFORGE_TOKEN env var and run ./gradlew curseforge
+// Uncomment the block below and fill in your project ID from the CurseForge URL.
+//
+// plugins { id 'net.darkhax.curseforgegradle' version '1.1.25' }
+// task curseforge(type: net.darkhax.curseforgegradle.TaskPublishCurseForge) {
+//     apiToken = System.getenv('CURSEFORGE_TOKEN')
+//     upload(/* YOUR_PROJECT_ID */, jar) {
+//         addGameVersion '1.21.1'
+//         addModLoader 'NeoForge'
+//         releaseType = 'release'
+//     }
+// }
+
+// ─── Modrinth publishing ──────────────────────────────────────────────────────
+// To publish: set MODRINTH_TOKEN env var and run ./gradlew modrinth
+// Uncomment the block below and fill in your Modrinth project ID.
+//
+// plugins { id 'com.modrinth.minotaur' version '2.+' }
+// modrinth {
+//     token = System.getenv('MODRINTH_TOKEN')
+//     projectId = /* 'YOUR_PROJECT_ID' */
+//     versionNumber = mod_version
+//     versionType = 'release'
+//     uploadFile = jar
+//     gameVersions = ['1.21.1']
+//     loaders = ['neoforge']
+// }

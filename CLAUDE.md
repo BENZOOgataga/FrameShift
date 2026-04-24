@@ -6,15 +6,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 FrameShift is a NeoForge 1.21.1 server-side mod for loading and pasting schematics without causing server lag or crashes. Performance safety over speed — the system must degrade gracefully rather than freeze or crash the server.
 
+## Working With This User
+
+The project owner is a Java/modding beginner — do not assume familiarity with NeoForge APIs, Gradle, or Minecraft internals. When explaining or implementing anything:
+- Prefer clear, readable code over clever abstractions
+- Add a one-line comment to every non-obvious method or field
+- Explain NeoForge concepts (event buses, mod containers, config specs, etc.) in plain language when they come up
+
 ## Build & Run
 
-This is a standard NeoForge/Gradle mod project. Typical commands (populate once build files exist):
-
 ```bash
-./gradlew build          # compile and package
-./gradlew runServer      # start a dev server
-./gradlew test           # run tests
+./gradlew build       # compile and package the mod jar
+./gradlew runServer   # start a local dev server (stops with 'stop' in console)
+./gradlew runClient   # launch the game client for testing
+./gradlew runData     # generate JSON data files (models, recipes, etc.)
 ```
+
+On Windows use `gradlew.bat` instead of `./gradlew`.
 
 ## Architecture
 
