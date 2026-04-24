@@ -77,6 +77,14 @@ public class SchemCommand {
                         ))))
                 .then(Commands.literal("paste")
                     .executes(context -> executePasteLoaded(context.getSource(), loader, null, false, false))
+                    .then(Commands.literal("freeze-gravity")
+                        .executes(context -> executePasteLoaded(context.getSource(), loader, null, false, false, true))
+                        .then(Commands.literal("debug")
+                            .executes(context -> executePasteLoaded(context.getSource(), loader, null, true, false, true)))
+                        .then(Commands.literal("no-clear")
+                            .executes(context -> executePasteLoaded(context.getSource(), loader, null, false, true, true))
+                            .then(Commands.literal("debug")
+                                .executes(context -> executePasteLoaded(context.getSource(), loader, null, true, true, true)))))
                     .then(Commands.literal("no-clear")
                         .executes(context -> executePasteLoaded(context.getSource(), loader, null, false, true))
                         .then(Commands.literal("debug")
@@ -91,6 +99,42 @@ public class SchemCommand {
                             false,
                             false
                         ))
+                        .then(Commands.literal("freeze-gravity")
+                            .executes(context -> executePasteLoaded(
+                                context.getSource(),
+                                loader,
+                                BlockPosArgument.getLoadedBlockPos(context, "pos"),
+                                false,
+                                false,
+                                true
+                            ))
+                            .then(Commands.literal("debug")
+                                .executes(context -> executePasteLoaded(
+                                    context.getSource(),
+                                    loader,
+                                    BlockPosArgument.getLoadedBlockPos(context, "pos"),
+                                    true,
+                                    false,
+                                    true
+                                )))
+                            .then(Commands.literal("no-clear")
+                                .executes(context -> executePasteLoaded(
+                                    context.getSource(),
+                                    loader,
+                                    BlockPosArgument.getLoadedBlockPos(context, "pos"),
+                                    false,
+                                    true,
+                                    true
+                                ))
+                                .then(Commands.literal("debug")
+                                    .executes(context -> executePasteLoaded(
+                                        context.getSource(),
+                                        loader,
+                                        BlockPosArgument.getLoadedBlockPos(context, "pos"),
+                                        true,
+                                        true,
+                                        true
+                                    )))))
                         .then(Commands.literal("no-clear")
                             .executes(context -> executePasteLoaded(
                                 context.getSource(),
@@ -256,6 +300,17 @@ public class SchemCommand {
         boolean debugWarnings,
         boolean skipClear
     ) {
+        return executePasteLoaded(source, loader, explicitPos, debugWarnings, skipClear, false);
+    }
+
+    private static int executePasteLoaded(
+        CommandSourceStack source,
+        SchematicLoader loader,
+        @Nullable net.minecraft.core.BlockPos explicitPos,
+        boolean debugWarnings,
+        boolean skipClear,
+        boolean freezeGravity
+    ) {
         LoadedSchematicSession loaded = LOADED_SCHEMATICS.get(sessionKey(source));
         if (loaded == null) {
             source.sendFailure(SchemMessages.error("No schematic is loaded. ", "Run /schem load <name> first."));
@@ -272,6 +327,7 @@ public class SchemCommand {
         MinecraftServer server = source.getServer();
         SchematicPasteJob job = new SchematicPasteJob(loaded.name, source.getLevel(), origin, player != null ? player.getUUID() : null);
         job.skipClear = skipClear;
+        job.freezeGravity = freezeGravity;
         if (!JobManager.submit(job)) {
             source.sendFailure(SchemMessages.error("Could not queue paste. ", "The max concurrent job limit has been reached."));
             return 0;
@@ -281,6 +337,11 @@ public class SchemCommand {
         if (skipClear) {
             source.sendSuccess(() -> SchemMessages.warning(
                 "No-clear mode is faster, but not safe: old world blocks, air gaps, and unsupported/falling blocks may remain inside the pasted area."
+            ), false);
+        }
+        if (freezeGravity) {
+            source.sendSuccess(() -> SchemMessages.warning(
+                "Freeze-gravity mode adds hidden support under unsupported falling blocks to preserve the build shape."
             ), false);
         }
 

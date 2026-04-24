@@ -9,8 +9,10 @@ import net.minecraft.world.level.block.state.BlockState;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayDeque;
+import java.util.Comparator;
 import java.util.UUID;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.PriorityBlockingQueue;
 
 // Represents one paste operation from submission through completion and verification.
 public class SchematicPasteJob {
@@ -38,7 +40,7 @@ public class SchematicPasteJob {
     public volatile boolean loadingComplete;
 
     public final LinkedBlockingQueue<PlacementTask> placementQueue;
-    public final LinkedBlockingQueue<PlacementTask> gravityPlacementQueue;
+    public final PriorityBlockingQueue<PlacementTask> gravityPlacementQueue;
     public final ArrayDeque<PlacementTask> blockEntityQueue = new ArrayDeque<>();
 
     public int totalBlocks;
@@ -57,6 +59,7 @@ public class SchematicPasteJob {
     public long placePhaseStartedAtNanos;
     public boolean placePhaseObserved;
     public boolean skipClear;
+    public boolean freezeGravity;
 
     public SchematicPasteJob(String schematicName, ServerLevel level, BlockPos origin, @Nullable UUID executorUuid) {
         this.jobId = UUID.randomUUID();
@@ -65,7 +68,13 @@ public class SchematicPasteJob {
         this.origin = origin;
         this.executorUuid = executorUuid;
         this.placementQueue = new LinkedBlockingQueue<>(FrameShiftConfig.maxQueuedPlacements.get());
-        this.gravityPlacementQueue = new LinkedBlockingQueue<>(FrameShiftConfig.maxQueuedPlacements.get());
+        this.gravityPlacementQueue = new PriorityBlockingQueue<>(
+            FrameShiftConfig.maxQueuedPlacements.get(),
+            Comparator
+                .comparingInt((PlacementTask task) -> task.worldPos.getY())
+                .thenComparingInt(task -> task.worldPos.getX())
+                .thenComparingInt(task -> task.worldPos.getZ())
+        );
         this.startedAtNanos = System.nanoTime();
         this.clearPhaseStartedAtNanos = startedAtNanos;
     }

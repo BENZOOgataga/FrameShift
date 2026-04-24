@@ -12,6 +12,8 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.FallingBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
@@ -162,7 +164,7 @@ public class TickHandler {
 
         queue.poll();
         job.blocksAttempted++;
-        PlacementResult placementResult = applyBlockState(job.level, task);
+        PlacementResult placementResult = applyBlockState(job, task);
         if (placementResult == PlacementResult.FAILED) {
             job.blocksFailed++;
             return true;
@@ -181,10 +183,12 @@ public class TickHandler {
         return true;
     }
 
-    private static PlacementResult applyBlockState(ServerLevel level, SchematicPasteJob.PlacementTask task) {
-        int flags = task.state.isAir()
-            ? Block.UPDATE_CLIENTS | Block.UPDATE_SUPPRESS_DROPS
-            : Block.UPDATE_ALL | Block.UPDATE_SUPPRESS_DROPS;
+    private static PlacementResult applyBlockState(SchematicPasteJob job, SchematicPasteJob.PlacementTask task) {
+        ServerLevel level = job.level;
+        int flags = placementFlags(task.state.isAir());
+        if (shouldFreezeGravity(job, level, task)) {
+            level.setBlock(task.worldPos.below(), Blocks.BARRIER.defaultBlockState(), Block.UPDATE_CLIENTS | Block.UPDATE_SUPPRESS_DROPS);
+        }
         boolean changed = level.setBlock(task.worldPos, task.state, flags);
         if (changed) {
             return PlacementResult.CHANGED;
@@ -193,6 +197,24 @@ public class TickHandler {
             return PlacementResult.FAILED;
         }
         return PlacementResult.NO_CHANGE;
+    }
+
+    // Applies schematic states without asking vanilla to immediately revalidate neighbors and fluids.
+    private static int placementFlags(boolean isAir) {
+        if (isAir) {
+            return Block.UPDATE_CLIENTS | Block.UPDATE_SUPPRESS_DROPS;
+        }
+        return Block.UPDATE_CLIENTS | Block.UPDATE_KNOWN_SHAPE | Block.UPDATE_SUPPRESS_DROPS;
+    }
+
+    private static boolean shouldFreezeGravity(SchematicPasteJob job, ServerLevel level, SchematicPasteJob.PlacementTask task) {
+        if (!job.freezeGravity || !(task.state.getBlock() instanceof FallingBlock)) {
+            return false;
+        }
+        if (task.worldPos.getY() <= level.getMinBuildHeight()) {
+            return false;
+        }
+        return FallingBlock.isFree(level.getBlockState(task.worldPos.below()));
     }
 
     private static boolean applyBlockEntity(ServerLevel level, SchematicPasteJob.PlacementTask task) {
