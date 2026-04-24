@@ -11,24 +11,28 @@ import net.neoforged.neoforge.event.tick.ServerTickEvent;
 public class TickHandler {
 
     // NeoForge calls this method automatically after every server tick completes.
-    // "Post" means the rest of the tick has already finished — safe to modify the world.
+    // "Post" means the rest of the tick has already finished, so it is safe to modify the world.
     @SubscribeEvent
     public void onServerTick(ServerTickEvent.Post event) {
         long tickStart = System.currentTimeMillis();
 
         for (SchematicPasteJob job : JobManager.all()) {
-            if (job.state != SchematicPasteJob.State.RUNNING) continue;
+            if (job.state != SchematicPasteJob.State.RUNNING) {
+                continue;
+            }
 
-            // Check if we've already used up our time budget for this tick
+            // Check if we have already used up our time budget for this tick.
             long elapsed = System.currentTimeMillis() - tickStart;
-            if (elapsed >= FrameShiftConfig.maxMillisPerTick.get()) break;
+            if (elapsed >= FrameShiftConfig.maxMillisPerTick.get()) {
+                break;
+            }
 
             // TODO: implement adaptive throttling based on current server MSPT
             // TODO: drain blockQueue, beQueue, entityQueue up to their per-tick limits
             // TODO: pause job automatically if a required chunk is unloaded
         }
 
-        // Periodically remove finished jobs so they don't accumulate in memory
+        // Periodically remove finished jobs so they do not accumulate in memory.
         JobManager.cleanup();
     }
 }

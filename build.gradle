@@ -39,12 +39,12 @@ runs {
     // Launch the Minecraft client for testing (not needed for a server-only mod, but useful)
     client { }
 
-    // Launch a local dev server — 'nogui' skips the Swing window
+    // Launch a local dev server; 'nogui' skips the Swing window
     server {
         programArgument '--nogui'
     }
 
-    // Generate JSON data files (block models, recipes, etc.) — run with: ./gradlew runData
+    // Generate JSON data files (block models, recipes, etc.); run with: ./gradlew runData
     data {
         arguments.addAll '--mod', mod_id,
             '--all',
@@ -54,8 +54,11 @@ runs {
 }
 
 dependencies {
-    // NeoForge itself — this pulls in the Minecraft + NeoForge API
+    // NeoForge itself; this pulls in the Minecraft and NeoForge API.
     implementation "net.neoforged:neoforge:${neo_version}"
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
 // Substitute placeholders like ${mod_id} in mods.toml with real values at build time
@@ -82,6 +85,10 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
 
+test {
+    useJUnitPlatform()
+}
+
 tasks.named('jar', Jar) {
     manifest {
         attributes([
@@ -95,7 +102,7 @@ tasks.named('jar', Jar) {
     }
 }
 
-// ─── CurseForge publishing ────────────────────────────────────────────────────
+// CurseForge publishing
 // To publish: set CURSEFORGE_TOKEN env var and run ./gradlew curseforge
 // Uncomment the block below and fill in your project ID from the CurseForge URL.
 //
@@ -109,7 +116,7 @@ tasks.named('jar', Jar) {
 //     }
 // }
 
-// ─── Modrinth publishing ──────────────────────────────────────────────────────
+// Modrinth publishing
 // To publish: set MODRINTH_TOKEN env var and run ./gradlew modrinth
 // Uncomment the block below and fill in your Modrinth project ID.
 //
