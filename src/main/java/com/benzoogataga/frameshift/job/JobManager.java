@@ -19,8 +19,7 @@ public class JobManager {
     // Attempt to add a new job. Returns false if the concurrent job limit has been reached.
     public static boolean submit(SchematicPasteJob job) {
         long active = jobs.values().stream()
-            .filter(j -> j.state == SchematicPasteJob.State.LOADING
-                || j.state == SchematicPasteJob.State.RUNNING
+            .filter(j -> j.state == SchematicPasteJob.State.RUNNING
                 || j.state == SchematicPasteJob.State.PAUSED)
             .count();
         if (active >= FrameShiftConfig.maxConcurrentJobs.get()) {
@@ -41,6 +40,7 @@ public class JobManager {
         SchematicPasteJob job = jobs.get(jobId);
         if (job != null && job.state == SchematicPasteJob.State.RUNNING) {
             job.state = SchematicPasteJob.State.PAUSED;
+            job.autoPaused = false;
         }
     }
 
@@ -48,6 +48,7 @@ public class JobManager {
         SchematicPasteJob job = jobs.get(jobId);
         if (job != null && job.state == SchematicPasteJob.State.PAUSED) {
             job.state = SchematicPasteJob.State.RUNNING;
+            job.autoPaused = false;
         }
     }
 
@@ -65,6 +66,7 @@ public class JobManager {
         jobs.entrySet().removeIf(entry ->
             entry.getValue().state == SchematicPasteJob.State.DONE
                 || entry.getValue().state == SchematicPasteJob.State.CANCELLED
+                || entry.getValue().state == SchematicPasteJob.State.FAILED
         );
     }
 }

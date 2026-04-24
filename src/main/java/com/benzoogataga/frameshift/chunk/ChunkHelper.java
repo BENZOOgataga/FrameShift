@@ -24,6 +24,19 @@ public class ChunkHelper {
         return SectionPos.blockToSectionCoord(pos.getZ());
     }
 
+    // Tries to load the chunk containing this position and returns whether it is now loaded.
+    public static boolean ensureLoaded(ServerLevel level, BlockPos pos) {
+        if (isLoaded(level, pos)) {
+            return true;
+        }
+        try {
+            level.getChunk(chunkX(pos), chunkZ(pos));
+            return isLoaded(level, pos);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
     // Ensures all chunks within 'radius' chunks of 'origin' are loaded before the paste starts.
     // If forceLoadChunks is false this only loads chunks that are naturally in range.
     public static void preloadChunks(ServerLevel level, BlockPos origin, int radius) {

@@ -5,10 +5,17 @@ import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.NbtAccounter;
 import net.minecraft.nbt.NbtIo;
 import net.minecraft.nbt.Tag;
+import org.jetbrains.annotations.Nullable;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayDeque;
+import java.util.HashMap;
+import java.util.Map;
 
 // Reads read-only metadata from Sponge .schem files without parsing block payloads.
 public class SpongeSchematicReader implements SchematicReader {
@@ -45,55 +52,44 @@ public class SpongeSchematicReader implements SchematicReader {
             throw new IOException("Schematic file is empty: " + file.getFileName());
         }
 
-        CompoundTag schematic = root;
-        SchematicFormat format;
-        int version;
-
-        if (root.contains(ROOT_SCHEMATIC, Tag.TAG_COMPOUND)) {
-            schematic = root.getCompound(ROOT_SCHEMATIC);
-            version = requireInt(schematic, "Version");
-            if (version != 3) {
-                throw new IOException("Unsupported Sponge version: " + version);
-            }
-            format = SchematicFormat.SPONGE_V3;
-        } else {
-            version = requireInt(root, "Version");
-            if (version == 2) {
-                format = SchematicFormat.SPONGE_V2;
-            } else {
-                throw new IOException("Unsupported Sponge version: " + version);
-            }
-        }
-
-        int sizeX = requireUnsignedShort(schematic, "Width");
-        int sizeY = requireUnsignedShort(schematic, "Height");
-        int sizeZ = requireUnsignedShort(schematic, "Length");
-        validateDimensions(sizeX, sizeY, sizeZ);
-
-        int dataVersion = schematic.contains("DataVersion", Tag.TAG_INT) ? schematic.getInt("DataVersion") : -1;
-        int entityCount = listSize(schematic, "Entities");
-        int blockEntityCount = format == SchematicFormat.SPONGE_V3
-            ? listSize(schematic.getCompound("Blocks"), "BlockEntities")
-            : listSize(schematic, "BlockEntities");
+        ParsedSchematic parsed = parseStructure(root, file, fileSize, true);
 
         return new SchematicMetadata(
             stemOf(file.getFileName().toString()),
             file.toAbsolutePath().normalize(),
-            format,
-            sizeX,
-            sizeY,
-            sizeZ,
+            parsed.format,
+            parsed.sizeX,
+            parsed.sizeY,
+            parsed.sizeZ,
+            parsed.offsetX,
+            parsed.offsetY,
+            parsed.offsetZ,
             fileSize,
-            dataVersion,
+            parsed.dataVersion,
             -1L,
-            blockEntityCount,
-            entityCount
+            parsed.blockEntityCount,
+            parsed.entityCount
         );
     }
 
     @Override
-    public BlockStream openBlockStream(Path file, SchematicReadOptions options) {
-        throw new UnsupportedOperationException("Block streaming is not implemented yet");
+    public BlockStream openBlockStream(Path file, SchematicReadOptions options) throws IOException {
+        if (!Files.isRegularFile(file) || !Files.isReadable(file)) {
+            throw new IOException("Schematic file is not readable: " + file);
+        }
+
+        long fileSize = Files.size(file);
+        if (fileSize > maxCompressedBytes) {
+            throw new IOException("Schematic file exceeds metadata read limit: " + file.getFileName());
+        }
+
+        CompoundTag root = NbtIo.readCompressed(file, NbtAccounter.unlimitedHeap());
+        if (root == null) {
+            throw new IOException("Schematic file is empty: " + file.getFileName());
+        }
+
+        ParsedSchematic parsed = parseStructure(root, file, fileSize, options.includeBlockEntities);
+        return new SpongeBlockStream(parsed, options);
     }
 
     // Reads a required int field and fails with a clear message when missing.
@@ -136,5 +132,274 @@ public class SpongeSchematicReader implements SchematicReader {
     private static String stemOf(String fileName) {
         int dot = fileName.lastIndexOf('.');
         return dot > 0 ? fileName.substring(0, dot) : fileName;
+    }
+
+    private ParsedSchematic parseStructure(CompoundTag root, Path file, long fileSize, boolean includeBlockEntities) throws IOException {
+        CompoundTag schematic = root;
+        SchematicFormat format;
+        int version;
+
+        if (root.contains(ROOT_SCHEMATIC, Tag.TAG_COMPOUND)) {
+            schematic = root.getCompound(ROOT_SCHEMATIC);
+            version = requireInt(schematic, "Version");
+            if (version != 3) {
+                throw new IOException("Unsupported Sponge version: " + version);
+            }
+            format = SchematicFormat.SPONGE_V3;
+        } else {
+            version = requireInt(root, "Version");
+            if (version != 2) {
+                throw new IOException("Unsupported Sponge version: " + version);
+            }
+            format = SchematicFormat.SPONGE_V2;
+        }
+
+        int sizeX = requireUnsignedShort(schematic, "Width");
+        int sizeY = requireUnsignedShort(schematic, "Height");
+        int sizeZ = requireUnsignedShort(schematic, "Length");
+        validateDimensions(sizeX, sizeY, sizeZ);
+        int dataVersion = schematic.contains("DataVersion", Tag.TAG_INT) ? schematic.getInt("DataVersion") : -1;
+        int entityCount = listSize(schematic, "Entities");
+        int[] offset = resolveOffset(schematic);
+
+        CompoundTag blockContainer = format == SchematicFormat.SPONGE_V3 ? requireCompound(schematic, "Blocks") : schematic;
+        CompoundTag palette = requireCompound(blockContainer, "Palette");
+        byte[] data = requireByteArray(blockContainer, format == SchematicFormat.SPONGE_V3 ? "Data" : "BlockData");
+        ListTag blockEntityList = format == SchematicFormat.SPONGE_V3
+            ? blockContainer.getList("BlockEntities", Tag.TAG_COMPOUND)
+            : schematic.getList("BlockEntities", Tag.TAG_COMPOUND);
+        Map<Integer, String> paletteById = invertPalette(palette);
+        Map<Integer, CompoundTag> blockEntities = readBlockEntities(
+            blockEntityList,
+            includeBlockEntities
+        );
+        int[] airPaletteIds = resolveAirPaletteIds(palette);
+
+        return new ParsedSchematic(
+            file.toAbsolutePath().normalize(),
+            format,
+            fileSize,
+            sizeX,
+            sizeY,
+            sizeZ,
+            dataVersion,
+            entityCount,
+            blockEntityList.size(),
+            offset[0],
+            offset[1],
+            offset[2],
+            data,
+            paletteById,
+            blockEntities,
+            airPaletteIds
+        );
+    }
+
+    private static CompoundTag requireCompound(CompoundTag tag, String key) throws IOException {
+        if (!tag.contains(key, Tag.TAG_COMPOUND)) {
+            throw new IOException("Missing required compound tag: " + key);
+        }
+        return tag.getCompound(key);
+    }
+
+    private static byte[] requireByteArray(CompoundTag tag, String key) throws IOException {
+        if (!tag.contains(key, Tag.TAG_BYTE_ARRAY)) {
+            throw new IOException("Missing required byte array tag: " + key);
+        }
+        return tag.getByteArray(key);
+    }
+
+    // Resolves schematic origin offset from Sponge Offset or WorldEdit Metadata fields.
+    private static int[] resolveOffset(CompoundTag schematic) {
+        if (schematic.contains("Offset", Tag.TAG_INT_ARRAY)) {
+            int[] values = schematic.getIntArray("Offset");
+            if (values.length >= 3) {
+                return new int[] { values[0], values[1], values[2] };
+            }
+        }
+
+        if (schematic.contains("Metadata", Tag.TAG_COMPOUND)) {
+            CompoundTag metadata = schematic.getCompound("Metadata");
+            int x = metadata.contains("WEOffsetX", Tag.TAG_INT) ? metadata.getInt("WEOffsetX") : 0;
+            int y = metadata.contains("WEOffsetY", Tag.TAG_INT) ? metadata.getInt("WEOffsetY") : 0;
+            int z = metadata.contains("WEOffsetZ", Tag.TAG_INT) ? metadata.getInt("WEOffsetZ") : 0;
+            return new int[] { x, y, z };
+        }
+
+        return new int[] { 0, 0, 0 };
+    }
+
+    private static Map<Integer, CompoundTag> readBlockEntities(ListTag list, boolean includeBlockEntities) {
+        if (!includeBlockEntities) {
+            return Map.of();
+        }
+
+        Map<Integer, CompoundTag> byIndex = new HashMap<>();
+        for (Tag element : list) {
+            if (!(element instanceof CompoundTag blockEntity)) {
+                continue;
+            }
+            int index = relativeIndex(blockEntity);
+            byIndex.put(index, blockEntity.copy());
+        }
+        return byIndex;
+    }
+
+    private static int relativeIndex(CompoundTag blockEntity) {
+        int[] pos = blockEntity.getIntArray("Pos");
+        if (pos.length == 3) {
+            return packPosition(pos[0], pos[1], pos[2]);
+        }
+        return Integer.MIN_VALUE;
+    }
+
+    private static int packPosition(int x, int y, int z) {
+        return (x & 0x3FF) << 20 | (y & 0x3FF) << 10 | (z & 0x3FF);
+    }
+
+    private static int[] resolveAirPaletteIds(CompoundTag palette) {
+        ArrayDeque<Integer> ids = new ArrayDeque<>();
+        for (String key : palette.getAllKeys()) {
+            String blockId = key.contains("[") ? key.substring(0, key.indexOf('[')) : key;
+            if (blockId.equals("minecraft:air") || blockId.equals("air") || blockId.equals("minecraft:cave_air") || blockId.equals("minecraft:void_air")) {
+                ids.add(palette.getInt(key));
+            }
+        }
+        int[] result = new int[ids.size()];
+        int index = 0;
+        for (Integer id : ids) {
+            result[index++] = id;
+        }
+        return result;
+    }
+
+    private static Map<Integer, String> invertPalette(CompoundTag palette) {
+        Map<Integer, String> byId = new HashMap<>();
+        for (String key : palette.getAllKeys()) {
+            byId.put(palette.getInt(key), key);
+        }
+        return byId;
+    }
+
+    private static final class SpongeBlockStream implements BlockStream {
+        private final ParsedSchematic parsed;
+        private final SchematicReadOptions options;
+        private final InputStream data;
+        private int cursor;
+        @Nullable
+        private SchematicBlockEntry nextEntry;
+
+        private SpongeBlockStream(ParsedSchematic parsed, SchematicReadOptions options) {
+            this.parsed = parsed;
+            this.options = options;
+            this.data = new ByteArrayInputStream(parsed.data);
+        }
+
+        @Override
+        public boolean hasNext() throws IOException {
+            if (nextEntry != null) {
+                return true;
+            }
+
+            while (cursor < parsed.volume()) {
+                int paletteId = readVarInt(data);
+                int localX = cursor % parsed.sizeX;
+                int localZ = (cursor / parsed.sizeX) % parsed.sizeZ;
+                int localY = cursor / (parsed.sizeX * parsed.sizeZ);
+                cursor++;
+
+                if (options.ignoreAir && isAirPaletteId(paletteId, parsed.airPaletteIds)) {
+                    continue;
+                }
+
+                CompoundTag blockEntity = options.includeBlockEntities
+                    ? parsed.blockEntities.get(packPosition(localX, localY, localZ))
+                    : null;
+                nextEntry = new SchematicBlockEntry(
+                    localX + parsed.offsetX,
+                    localY + parsed.offsetY,
+                    localZ + parsed.offsetZ,
+                    paletteId,
+                    parsed.paletteById.getOrDefault(paletteId, "minecraft:air"),
+                    blockEntity == null ? null : blockEntity.copy()
+                );
+                return true;
+            }
+
+            return false;
+        }
+
+        @Override
+        public SchematicBlockEntry next() throws IOException {
+            if (!hasNext()) {
+                throw new IOException("No more block entries are available");
+            }
+            SchematicBlockEntry current = nextEntry;
+            nextEntry = null;
+            return current;
+        }
+
+        @Override
+        public void close() {
+            try {
+                data.close();
+            } catch (IOException exception) {
+                throw new UncheckedIOException(exception);
+            }
+        }
+
+        private static boolean isAirPaletteId(int paletteId, int[] airPaletteIds) {
+            for (int airPaletteId : airPaletteIds) {
+                if (airPaletteId == paletteId) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static int readVarInt(InputStream stream) throws IOException {
+            int value = 0;
+            int position = 0;
+
+            while (true) {
+                int current = stream.read();
+                if (current == -1) {
+                    throw new IOException("Unexpected end of schematic block data");
+                }
+
+                value |= (current & 0x7F) << position;
+                if ((current & 0x80) == 0) {
+                    return value;
+                }
+
+                position += 7;
+                if (position >= 35) {
+                    throw new IOException("Block data varint is too large");
+                }
+            }
+        }
+    }
+
+    private record ParsedSchematic(
+        Path file,
+        SchematicFormat format,
+        long fileSize,
+        int sizeX,
+        int sizeY,
+        int sizeZ,
+        int dataVersion,
+        int entityCount,
+        int blockEntityCount,
+        int offsetX,
+        int offsetY,
+        int offsetZ,
+        byte[] data,
+        Map<Integer, String> paletteById,
+        Map<Integer, CompoundTag> blockEntities,
+        int[] airPaletteIds
+    ) {
+        private int volume() {
+            return sizeX * sizeY * sizeZ;
+        }
     }
 }

@@ -22,6 +22,9 @@ public class FrameShiftConfig {
     // Hard wall-clock limit per tick in milliseconds; stops the batch early if exceeded.
     public static ModConfigSpec.IntValue maxMillisPerTick;
 
+    // Max number of block placements buffered in memory per job before async parsing back-pressures.
+    public static ModConfigSpec.IntValue maxQueuedPlacements;
+
     // Scale down placement speed automatically when the server is lagging
     public static ModConfigSpec.BooleanValue adaptiveThrottling;
 
@@ -64,6 +67,7 @@ public class FrameShiftConfig {
         maxBlockEntitiesPerTick = builder.comment("Block entities restored per tick").defineInRange("maxBlockEntitiesPerTick", 100, 1, 10000);
         maxEntitiesPerTick = builder.comment("Entities spawned per tick").defineInRange("maxEntitiesPerTick", 20, 1, 1000);
         maxMillisPerTick = builder.comment("Max milliseconds to spend on placement per tick").defineInRange("maxMillisPerTick", 8, 1, 50);
+        maxQueuedPlacements = builder.comment("Max buffered block placements in memory per job before parser waits").defineInRange("maxQueuedPlacements", 20000, 1000, 2_000_000);
         adaptiveThrottling = builder.comment("Reduce speed automatically when server is lagging").define("adaptiveThrottling", true);
         builder.pop();
 

@@ -39,4 +39,5 @@ class SchematicLoaderTest {
 
         assertNotEquals(first, second);
     }
+
 }

@@ -11,6 +11,10 @@ public final class SchematicMetadata {
     public final int sizeX;
     public final int sizeY;
     public final int sizeZ;
+    // Paste-origin offset within the bounding box (from Sponge Offset or WEOffset fields).
+    public final int offsetX;
+    public final int offsetY;
+    public final int offsetZ;
     public final long fileSize;
     public final int dataVersion;
     public final long nonAirBlocks;
@@ -24,6 +28,9 @@ public final class SchematicMetadata {
         int sizeX,
         int sizeY,
         int sizeZ,
+        int offsetX,
+        int offsetY,
+        int offsetZ,
         long fileSize,
         int dataVersion,
         long nonAirBlocks,
@@ -36,6 +43,9 @@ public final class SchematicMetadata {
         this.sizeX = sizeX;
         this.sizeY = sizeY;
         this.sizeZ = sizeZ;
+        this.offsetX = offsetX;
+        this.offsetY = offsetY;
+        this.offsetZ = offsetZ;
         this.fileSize = fileSize;
         this.dataVersion = dataVersion;
         this.nonAirBlocks = nonAirBlocks;
