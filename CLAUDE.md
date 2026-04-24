@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-FrameShift is a NeoForge 1.21.1 server-side mod for loading and pasting schematics without causing server lag or crashes. Performance safety over speed — the system must degrade gracefully rather than freeze or crash the server.
+FrameShift is a NeoForge 1.21.1 server-side mod for loading and pasting schematics without causing server lag or crashes. Performance safety over speed - the system must degrade gracefully rather than freeze or crash the server.
 
-Author: BENZOOgataga (benzoogataga.com) — Mod ID: `frameshift` — Group: `com.benzoogataga.frameshift`
+Author: BENZOOgataga (benzoogataga.com) - Mod ID: `frameshift` - Group: `com.benzoogataga.frameshift`
 
 ## Working With This User
 
-The project owner is a Java/modding beginner — do not assume familiarity with NeoForge APIs, Gradle, or Minecraft internals. When explaining or implementing anything:
+The project owner is a Java/modding beginner - do not assume familiarity with NeoForge APIs, Gradle, or Minecraft internals. When explaining or implementing anything:
 - Prefer clear, readable code over clever abstractions
 - Add a one-line comment to every non-obvious method or field
 - Explain NeoForge concepts (event buses, mod containers, config specs, etc.) in plain language when they come up
@@ -28,7 +28,7 @@ On Windows, `./gradlew` works in Git Bash. Use `gradlew.bat` in CMD/PowerShell.
 
 ## Toolchain (Non-Negotiable Versions)
 
-These versions were arrived at after resolving real compatibility conflicts — do not upgrade without careful testing:
+These versions were arrived at after resolving real compatibility conflicts - do not upgrade without careful testing:
 
 | Tool | Version | Reason |
 |------|---------|--------|
@@ -39,33 +39,33 @@ These versions were arrived at after resolving real compatibility conflicts — 
 
 ## Known Build Quirks
 
-**ASM version conflict** — NeoForge's bootstraplauncher crashes if different ASM versions appear on the module path vs classpath. `build.gradle` forces all `org.ow2.asm:*` to `9.8` via `resolutionStrategy`. Do not remove this block.
+**ASM version conflict** - NeoForge's bootstraplauncher crashes if different ASM versions appear on the module path vs classpath. `build.gradle` forces all `org.ow2.asm:*` to `9.8` via `resolutionStrategy`. Do not remove this block.
 
-**Mod descriptor filename** — NeoForge 1.21+ uses `META-INF/neoforge.mods.toml`. The old `META-INF/mods.toml` name causes a "for Minecraft Forge or older NeoForge" load error. Do not rename it back.
+**Mod descriptor filename** - NeoForge 1.21+ uses `META-INF/neoforge.mods.toml`. The old `META-INF/mods.toml` name causes a "for Minecraft Forge or older NeoForge" load error. Do not rename it back.
 
-**processResources** — Uses `def replaceProperties` (not `var`) for Groovy compatibility. The `expand()` call substitutes `${...}` placeholders in `neoforge.mods.toml` at build time. `${file.jarVersion}` is a NeoForge runtime token and must NOT be in that map — use `${mod_version}` instead.
+**processResources** - Uses `def replaceProperties` (not `var`) for Groovy compatibility. The `expand()` call substitutes `${...}` placeholders in `neoforge.mods.toml` at build time. `${file.jarVersion}` is a NeoForge runtime token and must NOT be in that map - use `${mod_version}` instead.
 
-**Gradle wrapper args** — The `gradlew` script uses the `set --` + `xargs` pattern to forward CLI arguments to `GradleWrapperMain`. The simplified single-`eval` form does not pass arguments and silently runs the default `help` task instead.
+**Gradle wrapper args** - The `gradlew` script uses the `set --` + `xargs` pattern to forward CLI arguments to `GradleWrapperMain`. The simplified single-`eval` form does not pass arguments and silently runs the default `help` task instead.
 
-**NeoForge event subscriptions** — The `@Mod` constructor receives `IEventBus modEventBus` (for mod lifecycle events) and `ModContainer modContainer` (for config registration). Config is registered via `modContainer.registerConfig(ModConfig.Type.SERVER, spec)`, not via `ModLoadingContext`.
+**NeoForge event subscriptions** - The `@Mod` constructor receives `IEventBus modEventBus` (for mod lifecycle events) and `ModContainer modContainer` (for config registration). Config is registered via `modContainer.registerConfig(ModConfig.Type.SERVER, spec)`, not via `ModLoadingContext`.
 
-**Runs DSL** — In NeoGradle 7.0.165, use `argument`/`arguments` (not the deprecated `programArgument`/`programArguments`).
+**Runs DSL** - In NeoGradle 7.0.165, use `argument`/`arguments` (not the deprecated `programArgument`/`programArguments`).
 
 ## Package Structure
 
 ```
 com.benzoogataga.frameshift/
-├── FrameShift.java          @Mod entry point — wires event buses and config
+├── FrameShift.java          @Mod entry point - wires event buses and config
 ├── command/
 │   └── SchemCommand.java    /schem command tree (TODO)
 ├── schematic/
 │   ├── SchematicData.java   parsed file holder (dimensions, blocks, BEs, entities)
-│   └── SchematicLoader.java async file parser — returns CompletableFuture<SchematicData> (TODO)
+│   └── SchematicLoader.java async file parser - returns CompletableFuture<SchematicData> (TODO)
 ├── job/
 │   ├── SchematicPasteJob.java  job model: state enum + 3 ArrayDeque queues
 │   └── JobManager.java         static registry, enforces maxConcurrentJobs
 ├── tick/
-│   └── TickHandler.java     @SubscribeEvent ServerTickEvent.Post — drains queues (TODO)
+│   └── TickHandler.java     @SubscribeEvent ServerTickEvent.Post - drains queues (TODO)
 ├── config/
 │   └── FrameShiftConfig.java   all ModConfigSpec entries, registered SERVER type
 └── chunk/
@@ -101,8 +101,8 @@ com.benzoogataga.frameshift/
 - `maxMillisPerTick = 8`
 
 ### Supported Formats
-1. `.schem` (Sponge — primary)
-2. `.schematic` (legacy — optional)
+1. `.schem` (Sponge - primary)
+2. `.schematic` (legacy - optional)
 
 Both require full block state, block entity (NBT), and optional entity support.
 
@@ -120,7 +120,7 @@ schematics/
 |---------|---------|
 | `/schem list` | List available schematics with dimensions, block count, file size |
 | `/schem info <name>` | Show dimensions, volume, block entities, estimated paste time |
-| `/schem paste <name> [x y z]` | Paste — flags: `--ignore-air`, `--include-entities`, `--include-block-entities`, `--rotation`, `--mirror` |
+| `/schem paste <name> [x y z]` | Paste - flags: `--ignore-air`, `--include-entities`, `--include-block-entities`, `--rotation`, `--mirror` |
 | `/schem status` | Progress, blocks placed/remaining, ETA |
 | `/schem cancel/pause/resume <jobId>` | Job lifecycle control |
 | `/schem reload` | Reload config |
