@@ -61,7 +61,7 @@ test {
 ./gradlew test --tests "com.nonexistent.*"
 ```
 
-Expected: task runs and exits with "No tests found" (or 0 failures) — not a build error.
+Expected: task runs and exits with "No tests found" (or 0 failures) - not a build error.
 
 ---
 
@@ -104,7 +104,7 @@ class SchematicFormatTest {
 ./gradlew test --tests "com.benzoogataga.frameshift.schematic.SchematicFormatTest"
 ```
 
-Expected: compilation failure — `SchematicFormat` doesn't exist yet.
+Expected: compilation failure - `SchematicFormat` doesn't exist yet.
 
 - [ ] **Step 3: Create `SchematicFormat.java`**
 
@@ -199,7 +199,7 @@ class SchematicMetadataTest {
 ./gradlew test --tests "com.benzoogataga.frameshift.schematic.SchematicMetadataTest"
 ```
 
-Expected: compilation error — `SchematicMetadata` doesn't exist.
+Expected: compilation error - `SchematicMetadata` doesn't exist.
 
 - [ ] **Step 3: Create `SchematicMetadata.java`**
 
@@ -412,7 +412,7 @@ package com.benzoogataga.frameshift.schematic;
 
 import java.io.IOException;
 
-// Streaming iterator over block entries in a schematic — used by future paste implementation
+// Streaming iterator over block entries in a schematic - used by future paste implementation
 public interface BlockStream extends AutoCloseable {
     boolean hasNext() throws IOException;
     SchematicBlockEntry next() throws IOException;
@@ -430,13 +430,13 @@ import java.nio.file.Path;
 
 // Contract that every schematic format parser must implement
 public interface SchematicReader {
-    // Returns true if this reader can handle the given file (based on extension — no I/O)
+    // Returns true if this reader can handle the given file (based on extension - no I/O)
     boolean supports(Path file);
 
-    // Reads only the metadata (dimensions, counts) — no block data
+    // Reads only the metadata (dimensions, counts) - no block data
     SchematicMetadata readMetadata(Path file) throws IOException;
 
-    // Opens a block-by-block stream for paste — not implemented until Milestone 3
+    // Opens a block-by-block stream for paste - not implemented until Milestone 3
     BlockStream openBlockStream(Path file, SchematicReadOptions options) throws IOException;
 }
 ```
@@ -551,7 +551,7 @@ public class SpongeSchematicReader implements SchematicReader {
 
     @Override
     public boolean supports(Path file) {
-        // No file I/O — just check the extension
+        // No file I/O - just check the extension
         return file.getFileName().toString().endsWith(".schem");
     }
 
@@ -567,7 +567,7 @@ public class SpongeSchematicReader implements SchematicReader {
                 + " bytes (limit: " + maxCompressedBytes + ")");
         }
 
-        // TODO: replace with bounded streaming — NbtIo.readCompressed loads the full NBT tree
+        // TODO: replace with bounded streaming - NbtIo.readCompressed loads the full NBT tree
         CompoundTag tag = NbtIo.readCompressed(file, NbtAccounter.unlimitedHeap());
 
         if (!tag.contains("Version", Tag.TAG_INT)) {
@@ -623,7 +623,7 @@ public class SpongeSchematicReader implements SchematicReader {
         // Entities are at root in both v2 and v3
         int entityCount = tag.getList("Entities", Tag.TAG_COMPOUND).size();
 
-        // Release the entire NBT tree — we only needed the header
+        // Release the entire NBT tree - we only needed the header
         tag = null;
 
         return new SchematicMetadata(
@@ -797,7 +797,7 @@ public final class SchematicLoader {
                     }
 
                     if (collected.size() > effectiveLimit) {
-                        // We have one extra entry — that's proof there's a next page
+                        // We have one extra entry - that's proof there's a next page
                         hasMore = true;
                         break outer;
                     }
@@ -868,7 +868,7 @@ import net.neoforged.neoforge.event.RegisterCommandsEvent;
 
 public class SchemCommand {
 
-    // entry point — called once per server start with the active loader instance
+    // entry point - called once per server start with the active loader instance
     public static void register(RegisterCommandsEvent event, SchematicLoader loader) {
         // TODO in Task 10: build the /schem command tree using Brigadier
     }
@@ -915,7 +915,7 @@ public class FrameShift {
         NeoForge.EVENT_BUS.addListener(this::onServerStopping);
         NeoForge.EVENT_BUS.addListener(this::onRegisterCommands);
 
-        LOGGER.info("FrameShift loaded — Yet Another Schematics Manager");
+        LOGGER.info("FrameShift loaded - Yet Another Schematics Manager");
     }
 
     private void onServerAboutToStart(ServerAboutToStartEvent event) {
@@ -1044,7 +1044,7 @@ public class SchemCommand {
         }
 
         if (result.nextCursor != null) {
-            String hint = "More results — use /schem list " + result.nextCursor;
+            String hint = "More results - use /schem list " + result.nextCursor;
             source.sendSuccess(() -> Component.literal(hint), false);
         }
 
@@ -1060,7 +1060,7 @@ public class SchemCommand {
         // Reject names containing path separators to prevent directory traversal
         if (name.contains("/") || name.contains("\\") || name.contains("..")) {
             source.sendFailure(Component.literal(
-                "Invalid schematic name — path separators are not allowed."));
+                "Invalid schematic name - path separators are not allowed."));
             return 0;
         }
 
@@ -1231,7 +1231,7 @@ Entities:      0
 /schem info ../config/frameshift-server
 ```
 
-Expected: error message `Invalid schematic name — path separators are not allowed.`
+Expected: error message `Invalid schematic name - path separators are not allowed.`
 
 - [ ] **Step 7: Test missing schematic**
 

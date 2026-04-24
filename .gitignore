@@ -15,21 +15,21 @@ src/generated/resources/
 # Logs
 *.log
 
-# IDE — IntelliJ
+# IDE - IntelliJ
 .idea/
 *.iml
 *.ipr
 *.iws
 out/
 
-# IDE — Eclipse
+# IDE - Eclipse
 .eclipse/
 .classpath
 .project
 .settings/
 bin/
 
-# IDE — VS Code
+# IDE - VS Code
 .vscode/
 
 # OS

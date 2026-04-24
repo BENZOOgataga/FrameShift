@@ -2,17 +2,17 @@
 
 A NeoForge 1.21.1 server-side mod for loading and pasting schematics without causing lag spikes or crashes.
 
-**Performance safety over speed** — the system degrades gracefully under load instead of freezing the server.
+**Performance safety over speed** - the system degrades gracefully under load instead of freezing the server.
 
 ---
 
 ## Features
 
-- Progressive block placement — schematics are pasted over many ticks, never all at once
-- Adaptive throttling — automatically slows down when the server is struggling (based on MSPT)
-- Job control — pause, resume, and cancel pastes mid-way through
-- Full NBT support — block entities (chests, signs, spawners) and entities are preserved
-- Configurable limits — tune blocks-per-tick, time budget, concurrent jobs, and more
+- Progressive block placement - schematics are pasted over many ticks, never all at once
+- Adaptive throttling - automatically slows down when the server is struggling (based on MSPT)
+- Job control - pause, resume, and cancel pastes mid-way through
+- Full NBT support - block entities (chests, signs, spawners) and entities are preserved
+- Configurable limits - tune blocks-per-tick, time budget, concurrent jobs, and more
 
 ## Supported Formats
 

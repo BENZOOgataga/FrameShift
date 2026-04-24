@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-24
 **Milestone:** 1 (Parsing layer) + 2 (Read-only commands)
-**Status:** Approved — ready for implementation
+**Status:** Approved - ready for implementation
 
 ---
 
@@ -10,7 +10,7 @@
 
 FrameShift needs to read schematic files from disk and expose them to server operators. This milestone implements:
 1. A parsing abstraction layer (reader interface + Sponge implementation)
-2. Metadata-only reads (dimensions, format, file size — no block data)
+2. Metadata-only reads (dimensions, format, file size - no block data)
 3. `/schem list` and `/schem info` commands backed by async I/O
 
 Full block streaming (for paste) is out of scope here. The interfaces are defined now so paste can slot in without redesign.
@@ -107,7 +107,7 @@ Returns `true` if the filename ends with `.schem`. No file I/O.
 
 ### `readMetadata(Path file)`
 
-**Temporary implementation — marked with `// TODO: replace with bounded streaming`**
+**Temporary implementation - marked with `// TODO: replace with bounded streaming`**
 
 Steps:
 1. Assert file exists and is readable → `IOException` if not
@@ -129,8 +129,8 @@ Steps:
 9. `tag.getList("Entities", ...).size()` → `entityCount`
    - For both v2 and v3: `Entities` is at root (not inside `Blocks`)
    - `BlockEntities` is also at root in both versions
-10. `nonAirBlocks` = `-1` (requires full block data parse — not done here)
-11. Drop reference to root `CompoundTag` — must not be retained
+10. `nonAirBlocks` = `-1` (requires full block data parse - not done here)
+11. Drop reference to root `CompoundTag` - must not be retained
 12. Return `SchematicMetadata`
 
 **What is never touched:** `Palette`, `BlockData`, `Blocks.Data`, individual `BlockEntity` NBT contents.
@@ -164,13 +164,13 @@ this.readers = List.of(new SpongeSchematicReader(
 ));
 this.ioExecutor = Executors.newFixedThreadPool(config.metadataIoThreads.get());
 ```
-`SpongeSchematicReader` receives only the two numeric limits it needs — it does not depend on the full config class.
+`SpongeSchematicReader` receives only the two numeric limits it needs - it does not depend on the full config class.
 
 ### `shutdown()`
 Called on `ServerStoppingEvent`. Calls `ioExecutor.shutdown()`.
 
 ### `findReader(Path file)`
-Returns `Optional<SchematicReader>` — first reader where `supports(file)` is true.
+Returns `Optional<SchematicReader>` - first reader where `supports(file)` is true.
 
 ### `readMetadataAsync(Path file)`
 ```java
@@ -184,13 +184,13 @@ public CompletableFuture<SchematicListResult> listAsync(Path serverRoot, int lim
 ```
 
 - Resolves each entry in `config.schematicDirectories` relative to `serverRoot`
-- **Shallow traversal only** — `Files.list(dir)` (one level), no recursion
+- **Shallow traversal only** - `Files.list(dir)` (one level), no recursion
 - Skips directories that do not exist (no error)
 - Skips files where `findReader` returns empty (`skipped++`)
 - Calls `readMetadata` for each candidate; on failure logs warning and increments `failed`
 - **Rate-limited logging:** logs first 5 failures verbosely, then summarises the rest as `"... N more files failed, see debug log"`
 - Files within each directory are sorted alphabetically by filename stem before pagination
-- Cursor is the filename stem of the last returned entry — `listAsync` resumes from the first entry strictly after that name (alphabetical, case-insensitive)
+- Cursor is the filename stem of the last returned entry - `listAsync` resumes from the first entry strictly after that name (alphabetical, case-insensitive)
 - Returns at most `limit` entries (bounded by `config.maxListResults`)
 - Runs entirely on `ioExecutor`
 
@@ -228,7 +228,7 @@ These are read at `SchematicLoader` construction time. Changes require a server 
 ### `/schem list [cursor]`
 
 - Permission: level 2 (OP)
-- `cursor`: optional `StringArgumentType.word()` — filename stem of last seen entry
+- `cursor`: optional `StringArgumentType.word()` - filename stem of last seen entry
 - Dispatches `loader.listAsync(serverRoot, maxListResults, cursor)` on IO executor
 - Result returned to server thread via `.thenAcceptAsync(result -> { ... }, server::execute)`
 - Errors returned to server thread via:
@@ -240,13 +240,13 @@ These are read at `SchematicLoader` construction time. Changes require a server 
   ```
 - Return values: `1` on success, `0` on failure
 - Output format per entry: `name  WxHxL  filesize`
-- Footer: if `nextCursor != null`, shows `"More results — use /schem list <cursor>"` with the cursor value
+- Footer: if `nextCursor != null`, shows `"More results - use /schem list <cursor>"` with the cursor value
 - Shows skipped/failed counts if non-zero
 
 ### `/schem info <name>`
 
 - Permission: level 2 (OP)
-- `<name>`: `StringArgumentType.greedyString()` — filename stem (no extension), searched across configured directories in order
+- `<name>`: `StringArgumentType.greedyString()` - filename stem (no extension), searched across configured directories in order
 - If name contains path separators, reject with a clear error
 - Resolves to first matching file found across directories
 - Dispatches `loader.readMetadataAsync(path)` on IO executor
