@@ -11,7 +11,9 @@ A NeoForge 1.21.1 server-side mod for loading and pasting schematics without cau
 - Progressive block placement - schematics are pasted over many ticks, never all at once
 - Adaptive throttling - automatically slows down when the server is struggling (based on MSPT)
 - Job control - pause, resume, and cancel pastes mid-way through
+- Rollback on cancel - cancelling a job restores every block the paste already changed
 - Full NBT support - block entities (chests, signs, spawners) and entities are preserved
+- Gravity block safety - detects all gravity-affected blocks (sand, gravel, concrete powder, suspicious sand/gravel, pointed dripstone, and modded equivalents) and optionally freezes them during paste to prevent premature falling
 - Configurable limits - tune blocks-per-tick, time budget, concurrent jobs, and more
 
 ## Supported Formats
