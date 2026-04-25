@@ -20,6 +20,7 @@ public class JobManager {
     public static boolean submit(SchematicPasteJob job) {
         long active = jobs.values().stream()
             .filter(j -> j.state == SchematicPasteJob.State.RUNNING
+                || j.state == SchematicPasteJob.State.ROLLING_BACK
                 || j.state == SchematicPasteJob.State.PAUSED)
             .count();
         if (active >= FrameShiftConfig.maxConcurrentJobs.get()) {
@@ -32,13 +33,20 @@ public class JobManager {
     public static void cancel(UUID jobId) {
         SchematicPasteJob job = jobs.get(jobId);
         if (job != null) {
-            job.state = SchematicPasteJob.State.CANCELLED;
+            job.clearForwardQueues();
+            if (job.rollbackIndex.isEmpty()) {
+                job.rollbackMode = false;
+                job.state = SchematicPasteJob.State.CANCELLED;
+            } else {
+                RollbackStore.rebuildRollbackQueue(job);
+                job.beginRollback();
+            }
         }
     }
 
     public static void pause(UUID jobId) {
         SchematicPasteJob job = jobs.get(jobId);
-        if (job != null && job.state == SchematicPasteJob.State.RUNNING) {
+        if (job != null && (job.state == SchematicPasteJob.State.RUNNING || job.state == SchematicPasteJob.State.ROLLING_BACK)) {
             job.state = SchematicPasteJob.State.PAUSED;
             job.autoPaused = false;
         }
@@ -47,7 +55,7 @@ public class JobManager {
     public static void resume(UUID jobId) {
         SchematicPasteJob job = jobs.get(jobId);
         if (job != null && job.state == SchematicPasteJob.State.PAUSED) {
-            job.state = SchematicPasteJob.State.RUNNING;
+            job.state = job.rollbackMode ? SchematicPasteJob.State.ROLLING_BACK : SchematicPasteJob.State.RUNNING;
             job.autoPaused = false;
         }
     }

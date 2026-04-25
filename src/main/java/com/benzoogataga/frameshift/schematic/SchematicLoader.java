@@ -26,6 +26,7 @@ import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -119,7 +120,7 @@ public final class SchematicLoader {
 
     // Returns distinct schematic name suggestions from supported files in configured directories.
     public List<String> suggestNames(Path serverRoot) {
-        List<String> suggestions = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
         List<String> schematicDirectories = configuredDirectories();
 
         for (String directoryName : schematicDirectories) {
@@ -133,15 +134,14 @@ public final class SchematicLoader {
                     .filter(Files::isRegularFile)
                     .filter(path -> findReader(path).isPresent())
                     .map(path -> stemOf(path.getFileName().toString()))
-                    .filter(name -> !suggestions.contains(name))
                     .sorted(String.CASE_INSENSITIVE_ORDER)
-                    .forEach(suggestions::add);
+                    .forEach(seen::add);
             } catch (IOException exception) {
                 FrameShift.LOGGER.warn("Could not gather schematic suggestions from {}: {}", directory, exception.getMessage());
             }
         }
 
-        return suggestions;
+        return new ArrayList<>(seen);
     }
 
     // Parses and resolves a schematic into concrete block placements off the server thread.
@@ -221,21 +221,18 @@ public final class SchematicLoader {
                 SchematicMetadata metadata = reader.readMetadata(file);
                 Map<String, BlockState> parsedStates = new HashMap<>();
                 HolderLookup.RegistryLookup<net.minecraft.world.level.block.Block> blockLookup = level.registryAccess().lookupOrThrow(Registries.BLOCK);
-                int placeableBlocks = 0;
 
-                try (BlockStream countStream = reader.openBlockStream(file, options)) {
-                    while (countStream.hasNext()) {
-                        if (job.state == SchematicPasteJob.State.CANCELLED || job.state == SchematicPasteJob.State.FAILED) {
-                            break;
-                        }
-                        countStream.next();
-                        placeableBlocks++;
-                    }
+                // Set a rough upper-bound for the HUD before streaming begins; updated to the exact
+                // count after the single enqueue pass completes.
+                long clearOps = job.skipClear ? 0L : metadata.volume();
+                job.clearOperationsTotal = (int) Math.min(clearOps, Integer.MAX_VALUE);
+                if (metadata.nonAirBlocks >= 0L) {
+                    job.displayTotalBlocks = (int) Math.min(metadata.nonAirBlocks, Integer.MAX_VALUE);
+                    job.expectedTotalBlocks = (int) Math.min(clearOps + metadata.nonAirBlocks, Integer.MAX_VALUE);
+                } else {
+                    job.displayTotalBlocks = -1;
+                    job.expectedTotalBlocks = -1;
                 }
-
-                job.expectedTotalBlocks = Math.toIntExact((job.skipClear ? 0L : metadata.volume()) + placeableBlocks);
-                job.displayTotalBlocks = placeableBlocks;
-                job.clearOperationsTotal = job.skipClear ? 0 : Math.toIntExact(metadata.volume());
 
                 if (!job.skipClear) {
                     // Clear the full schematic bounds from metadata so every position inside the volume is reset,
@@ -246,9 +243,12 @@ public final class SchematicLoader {
                     job.placePhaseStartedAtNanos = System.nanoTime();
                 }
 
+                int placeableBlocks = 0;
                 try (BlockStream stream = reader.openBlockStream(file, options)) {
                     while (stream.hasNext()) {
-                        if (job.state == SchematicPasteJob.State.CANCELLED || job.state == SchematicPasteJob.State.FAILED) {
+                        if (job.state == SchematicPasteJob.State.CANCELLED
+                            || job.state == SchematicPasteJob.State.FAILED
+                            || job.rollbackMode) {
                             break;
                         }
 
@@ -272,8 +272,13 @@ public final class SchematicLoader {
                         } else {
                             job.enqueuePlacement(task);
                         }
+                        placeableBlocks++;
                     }
                 }
+
+                // Now that we have the exact count, update the display total for accurate progress.
+                job.displayTotalBlocks = placeableBlocks;
+                job.expectedTotalBlocks = (int) Math.min(clearOps + placeableBlocks, Integer.MAX_VALUE);
 
                 if (!invalidStateIds.isEmpty()) {
                     FrameShift.LOGGER.warn(
@@ -485,7 +490,9 @@ public final class SchematicLoader {
         for (int y = metadata.sizeY - 1; y >= 0; y--) {
             for (int z = 0; z < metadata.sizeZ; z++) {
                 for (int x = 0; x < metadata.sizeX; x++) {
-                    if (job.state == SchematicPasteJob.State.CANCELLED || job.state == SchematicPasteJob.State.FAILED) {
+                    if (job.state == SchematicPasteJob.State.CANCELLED
+                        || job.state == SchematicPasteJob.State.FAILED
+                        || job.rollbackMode) {
                         return;
                     }
 

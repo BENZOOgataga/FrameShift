@@ -14,6 +14,7 @@ The project owner is a Java/modding beginner - do not assume familiarity with Ne
 - Prefer clear, readable code over clever abstractions
 - Add a one-line comment to every non-obvious method or field
 - Explain NeoForge concepts (event buses, mod containers, config specs, etc.) in plain language when they come up
+- When asked to create a commit, use a Conventional Commits style message
 
 ## Build & Run
 

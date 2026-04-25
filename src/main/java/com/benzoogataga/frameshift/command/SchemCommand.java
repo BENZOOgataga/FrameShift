@@ -3,6 +3,8 @@ package com.benzoogataga.frameshift.command;
 import com.benzoogataga.frameshift.FrameShift;
 import com.benzoogataga.frameshift.config.FrameShiftConfig;
 import com.benzoogataga.frameshift.job.JobManager;
+import com.benzoogataga.frameshift.job.JobPersistence;
+import com.benzoogataga.frameshift.job.RollbackStore;
 import com.benzoogataga.frameshift.job.SchematicPasteJob;
 import com.benzoogataga.frameshift.schematic.SchematicListResult;
 import com.benzoogataga.frameshift.schematic.SchematicLoader;
@@ -25,6 +27,7 @@ import net.neoforged.fml.config.ModConfig;
 import net.neoforged.fml.config.ModConfigs;
 import net.neoforged.fml.event.config.ModConfigEvent;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import org.jetbrains.annotations.Nullable;
 
 import java.lang.reflect.Method;
@@ -160,11 +163,31 @@ public class SchemCommand {
                                 false
                             )))))
                 .then(Commands.literal("status")
-                    .executes(context -> executeStatus(context.getSource())))
+                    .executes(context -> executeStatus(context.getSource()))
+                    .then(Commands.argument("jobId", StringArgumentType.word())
+                        .suggests((context, builder) -> suggestJobIds(builder))
+                        .executes(context -> executeStatusJob(
+                            context.getSource(),
+                            StringArgumentType.getString(context, "jobId")
+                        ))))
                 .then(Commands.literal("cancel")
                     .then(Commands.argument("jobId", StringArgumentType.word())
                         .suggests((context, builder) -> suggestJobIds(builder))
                         .executes(context -> executeCancel(
+                            context.getSource(),
+                            StringArgumentType.getString(context, "jobId")
+                        ))))
+                .then(Commands.literal("pause")
+                    .then(Commands.argument("jobId", StringArgumentType.word())
+                        .suggests((context, builder) -> suggestRunningJobIds(builder))
+                        .executes(context -> executePause(
+                            context.getSource(),
+                            StringArgumentType.getString(context, "jobId")
+                        ))))
+                .then(Commands.literal("resume")
+                    .then(Commands.argument("jobId", StringArgumentType.word())
+                        .suggests((context, builder) -> suggestPausedJobIds(builder))
+                        .executes(context -> executeResume(
                             context.getSource(),
                             StringArgumentType.getString(context, "jobId")
                         ))))
@@ -328,6 +351,11 @@ public class SchemCommand {
         SchematicPasteJob job = new SchematicPasteJob(loaded.name, source.getLevel(), origin, player != null ? player.getUUID() : null);
         job.skipClear = skipClear;
         job.freezeGravity = freezeGravity;
+        job.schematicPath = loaded.file;
+        if (!RollbackStore.initializeStorage(job, server.getServerDirectory())) {
+            source.sendFailure(SchemMessages.error("Could not prepare rollback storage. ", job.failureReason != null ? job.failureReason : "Unknown error."));
+            return 0;
+        }
         if (!JobManager.submit(job)) {
             source.sendFailure(SchemMessages.error("Could not queue paste. ", "The max concurrent job limit has been reached."));
             return 0;
@@ -428,38 +456,20 @@ public class SchemCommand {
             source.sendSuccess(() -> SchemMessages.info("No active schematic jobs."), false);
             return Command.SINGLE_SUCCESS;
         }
-
         for (SchematicPasteJob job : JobManager.all()) {
-            double mspt = job.level.getServer().getAverageTickTimeNanos() / 1_000_000.0D;
-            double configuredBlocksPerSecond = FrameShiftConfig.maxBlocksPerTick.get() * throttleFactor(mspt) * 20.0D;
-            long etaSeconds = job.etaSeconds(System.nanoTime(), configuredBlocksPerSecond);
-            boolean clearing = job.isClearingPhase();
-            int phaseDone = clearing ? job.clearCompletedOperations() : job.displayCompletedBlocks();
-            int phaseTotal = clearing ? job.clearOperationsTotal : job.displayTotalBlocks;
-            String phasePct = phaseTotal > 0
-                ? String.format(Locale.ROOT, "%.2f", Math.min(100.0D, phaseDone * 100.0D / phaseTotal))
-                : "0.00";
-            String line = "Job " + shortJobId(job)
-                + " | " + job.schematicName
-                + " | state=" + job.state
-                + " | phase=" + (clearing ? "clearing" : "placing")
-                + " | pct=" + phasePct + "%"
-                + " | queued=" + job.placementQueue.size()
-                + " | blockEntities=" + job.blockEntityQueue.size()
-                + " | blocks=" + job.displayCompletedBlocks() + "/" + job.displayTotalBlocks
-                + " | clear=" + job.clearCompletedOperations() + "/" + job.clearOperationsTotal
-                + " | ops=" + job.blocksAttempted + "/" + job.expectedTotalBlocks
-                + " | changed=" + job.blocksPlaced
-                + " | unchanged=" + job.blocksUnchanged
-                + " | failed=" + job.blocksFailed
-                + " | eta=" + formatEta(etaSeconds)
-                + " | remaining=" + job.displayRemainingBlocks();
-            source.sendSuccess(() -> SchemMessages.info(line), false);
-            if (job.failureReason != null && !job.failureReason.isBlank()) {
-                source.sendSuccess(() -> SchemMessages.warning("Failure: " + job.failureReason), false);
-            }
+            Component line = buildCompactStatusLine(job);
+            source.sendSuccess(() -> line, false);
         }
+        return Command.SINGLE_SUCCESS;
+    }
 
+    private static int executeStatusJob(CommandSourceStack source, String jobToken) {
+        SchematicPasteJob job = findJobByToken(jobToken);
+        if (job == null) {
+            source.sendFailure(SchemMessages.error("Job not found: ", jobToken));
+            return 0;
+        }
+        sendVerboseStatus(source, job);
         return Command.SINGLE_SUCCESS;
     }
 
@@ -478,12 +488,213 @@ public class SchemCommand {
             ));
             return 0;
         }
+        if (job.state == SchematicPasteJob.State.ROLLING_BACK || (job.state == SchematicPasteJob.State.PAUSED && job.rollbackMode)) {
+            source.sendFailure(SchemMessages.error(
+                "Job is already rolling back: ",
+                shortJobId(job) + " (" + job.schematicName + ")."
+            ));
+            return 0;
+        }
 
         JobManager.cancel(job.jobId);
+        if (job.state == SchematicPasteJob.State.CANCELLED) {
+            JobPersistence.delete(job.jobId, source.getServer().getServerDirectory());
+            source.sendSuccess(() -> SchemMessages.warning(
+                "Cancelled job " + shortJobId(job) + " (" + job.schematicName + "). No world changes needed rollback."
+            ), true);
+        } else {
+            source.sendSuccess(() -> SchemMessages.warning(
+                "Rollback started for job " + shortJobId(job) + " (" + job.schematicName + ")."
+            ), true);
+        }
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int executePause(CommandSourceStack source, String jobToken) {
+        SchematicPasteJob job = findJobByToken(jobToken);
+        if (job == null) {
+            source.sendFailure(SchemMessages.error("Job not found: ", jobToken));
+            return 0;
+        }
+        if (job.state != SchematicPasteJob.State.RUNNING && job.state != SchematicPasteJob.State.ROLLING_BACK) {
+            source.sendFailure(SchemMessages.error(
+                "Job is not active: ",
+                shortJobId(job) + " is " + job.state.toString().toLowerCase(Locale.ROOT) + "."
+            ));
+            return 0;
+        }
+        JobManager.pause(job.jobId);
         source.sendSuccess(() -> SchemMessages.warning(
-            "Cancelled job " + shortJobId(job) + " (" + job.schematicName + "). Rollback is not implemented yet."
+            "Paused " + (job.rollbackMode ? "rollback" : "job") + " " + shortJobId(job) + " (" + job.schematicName + ")."
         ), true);
         return Command.SINGLE_SUCCESS;
+    }
+
+    private static int executeResume(CommandSourceStack source, String jobToken) {
+        SchematicPasteJob job = findJobByToken(jobToken);
+        if (job == null) {
+            source.sendFailure(SchemMessages.error("Job not found: ", jobToken));
+            return 0;
+        }
+        if (job.state != SchematicPasteJob.State.PAUSED) {
+            source.sendFailure(SchemMessages.error(
+                "Job is not paused: ",
+                shortJobId(job) + " is " + job.state.toString().toLowerCase(Locale.ROOT) + "."
+            ));
+            return 0;
+        }
+        JobManager.resume(job.jobId);
+        source.sendSuccess(() -> SchemMessages.success(
+            "Resumed " + (job.rollbackMode ? "rollback" : "job") + " " + shortJobId(job) + " (" + job.schematicName + ")."
+        ), true);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static Component buildCompactStatusLine(SchematicPasteJob job) {
+        boolean rollback = job.rollbackMode;
+        boolean clearing = !rollback && job.isClearingPhase();
+        int done = rollback ? job.rollbackCompletedOperations() : (clearing ? job.clearCompletedOperations() : job.displayCompletedBlocks());
+        int total = rollback
+            ? Math.max(job.rollbackQueued, job.rollbackCompletedOperations())
+            : (clearing
+                ? job.clearOperationsTotal
+                : job.knownPlaceTotal());
+        boolean totalKnown = rollback || clearing || job.hasKnownPlaceTotal();
+        double pct = totalKnown && total > 0 ? Math.min(100.0, done * 100.0 / total) : 0.0;
+        double mspt = job.level.getServer().getAverageTickTimeNanos() / 1_000_000.0;
+        double bps = FrameShiftConfig.maxBlocksPerTick.get() * FrameShiftConfig.throttleFactor(mspt) * 20.0;
+        long eta = totalKnown ? job.etaSeconds(System.nanoTime(), bps) : -1L;
+        String bar = progressBar(totalKnown ? (int) pct : 0, 8);
+        ChatFormatting stateColor = stateColor(job.state);
+        ChatFormatting progressColor = job.state == SchematicPasteJob.State.PAUSED
+            ? ChatFormatting.YELLOW
+            : (rollback ? ChatFormatting.GOLD : ChatFormatting.GREEN);
+        return SchemMessages.prefix()
+            .append(Component.literal(shortJobId(job) + "  ").withStyle(ChatFormatting.AQUA))
+            .append(Component.literal(job.schematicName + "  ").withStyle(ChatFormatting.WHITE))
+            .append(Component.literal(job.state.toString().toLowerCase(Locale.ROOT)).withStyle(stateColor))
+            .append(Component.literal("  " + (rollback ? "rollback" : (clearing ? "clearing" : "placing")) + " ").withStyle(ChatFormatting.GRAY))
+            .append(Component.literal(totalKnown ? String.format(Locale.ROOT, "%.1f", pct) + "% " : "streaming ").withStyle(progressColor))
+            .append(Component.literal("[" + bar + "]  ").withStyle(progressColor))
+            .append(Component.literal(formatCount(done) + " / " + (totalKnown ? formatCount(total) : "streaming")).withStyle(ChatFormatting.WHITE))
+            .append(Component.literal("  ETA " + formatEta(eta)).withStyle(ChatFormatting.GRAY));
+    }
+
+    private static void sendVerboseStatus(CommandSourceStack source, SchematicPasteJob job) {
+        boolean rollback = job.rollbackMode;
+        boolean clearing = !rollback && job.isClearingPhase();
+        int done = rollback ? job.rollbackCompletedOperations() : (clearing ? job.clearCompletedOperations() : job.displayCompletedBlocks());
+        int total = rollback
+            ? Math.max(job.rollbackQueued, job.rollbackCompletedOperations())
+            : (clearing
+                ? job.clearOperationsTotal
+                : job.knownPlaceTotal());
+        boolean totalKnown = rollback || clearing || job.hasKnownPlaceTotal();
+        double pct = totalKnown && total > 0 ? Math.min(100.0, done * 100.0 / total) : 0.0;
+        double mspt = job.level.getServer().getAverageTickTimeNanos() / 1_000_000.0;
+        double bps = FrameShiftConfig.maxBlocksPerTick.get() * FrameShiftConfig.throttleFactor(mspt) * 20.0;
+        long eta = totalKnown ? job.etaSeconds(System.nanoTime(), bps) : -1L;
+        String bar = progressBar(totalKnown ? (int) pct : 0, 10);
+        String pctStr = totalKnown ? String.format(Locale.ROOT, "%.2f", pct) : "streaming";
+        String doneStr = formatCount(done);
+        String totalStr = totalKnown ? formatCount(total) : "streaming";
+        String etaStr = formatEta(eta);
+        ChatFormatting stateColor = stateColor(job.state);
+        ChatFormatting progressColor = job.state == SchematicPasteJob.State.PAUSED
+            ? ChatFormatting.YELLOW
+            : (rollback ? ChatFormatting.GOLD : ChatFormatting.GREEN);
+        net.minecraft.core.BlockPos origin = job.origin;
+        boolean clearDone = !job.isClearingPhase();
+
+        source.sendSuccess(() -> SchemMessages.prefix()
+            .append(Component.literal("Job ").withStyle(ChatFormatting.GRAY))
+            .append(Component.literal(shortJobId(job) + "  ").withStyle(ChatFormatting.AQUA))
+            .append(Component.literal(job.schematicName + "  ").withStyle(ChatFormatting.WHITE))
+            .append(Component.literal(job.state.toString().toLowerCase(Locale.ROOT)).withStyle(stateColor)),
+            false);
+
+        source.sendSuccess(() -> SchemMessages.prefix()
+            .append(Component.literal("Phase: ").withStyle(ChatFormatting.GRAY))
+            .append(Component.literal((rollback ? "rollback" : (clearing ? "clearing" : "placing")) + "  ").withStyle(ChatFormatting.WHITE))
+            .append(Component.literal(pctStr + "% ").withStyle(progressColor))
+            .append(Component.literal("[" + bar + "]  ").withStyle(progressColor))
+            .append(Component.literal(doneStr + " / " + totalStr).withStyle(ChatFormatting.WHITE))
+            .append(Component.literal("  ETA: ").withStyle(ChatFormatting.GRAY))
+            .append(Component.literal(etaStr).withStyle(ChatFormatting.WHITE)),
+            false);
+
+        source.sendSuccess(() -> SchemMessages.prefix()
+            .append(Component.literal("Origin: ").withStyle(ChatFormatting.GRAY))
+            .append(Component.literal(origin.getX() + ", " + origin.getY() + ", " + origin.getZ() + "  ").withStyle(ChatFormatting.WHITE))
+            .append(Component.literal("Remaining: ").withStyle(ChatFormatting.GRAY))
+            .append(Component.literal(job.hasKnownPlaceTotal() ? formatCount(job.displayRemainingBlocks()) : "streaming").withStyle(ChatFormatting.WHITE)),
+            false);
+
+        if (rollback) {
+            source.sendSuccess(() -> SchemMessages.prefix()
+                .append(Component.literal("Rollback: ").withStyle(ChatFormatting.GRAY))
+                .append(Component.literal(formatCount(job.rollbackApplied) + " restored  ").withStyle(ChatFormatting.GREEN))
+                .append(Component.literal("Skipped: ").withStyle(ChatFormatting.GRAY))
+                .append(Component.literal(formatCount(job.rollbackSkippedConflicts) + "  ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal("Failed: ").withStyle(ChatFormatting.GRAY))
+                .append(Component.literal(formatCount(job.rollbackFailed)).withStyle(job.rollbackFailed > 0 ? ChatFormatting.RED : ChatFormatting.WHITE)),
+                false);
+        } else {
+            source.sendSuccess(() -> SchemMessages.prefix()
+                .append(Component.literal("Placed: ").withStyle(ChatFormatting.GRAY))
+                .append(Component.literal(formatCount(job.blocksPlaced) + "  ").withStyle(ChatFormatting.GREEN))
+                .append(Component.literal("Unchanged: ").withStyle(ChatFormatting.GRAY))
+                .append(Component.literal(formatCount(job.blocksUnchanged) + "  ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal("Failed: ").withStyle(ChatFormatting.GRAY))
+                .append(Component.literal(formatCount(job.blocksFailed) + "  ").withStyle(job.blocksFailed > 0 ? ChatFormatting.RED : ChatFormatting.WHITE))
+                .append(Component.literal("Block entities: ").withStyle(ChatFormatting.GRAY))
+                .append(Component.literal(Integer.toString(job.blockEntitiesApplied)).withStyle(ChatFormatting.WHITE)),
+                false);
+
+            if (job.clearOperationsTotal > 0) {
+                source.sendSuccess(() -> SchemMessages.prefix()
+                    .append(Component.literal("Clear ops: ").withStyle(ChatFormatting.GRAY))
+                    .append(Component.literal(formatCount(job.clearCompletedOperations()) + " / " + formatCount(job.clearOperationsTotal)).withStyle(ChatFormatting.WHITE))
+                    .append(Component.literal(clearDone ? "  (complete)" : "").withStyle(ChatFormatting.GREEN)),
+                    false);
+            }
+        }
+
+        source.sendSuccess(() -> SchemMessages.prefix()
+            .append(Component.literal("Queue: ").withStyle(ChatFormatting.GRAY))
+            .append(Component.literal(
+                rollback
+                    ? formatCount(job.rollbackQueue.size()) + " rollback entries"
+                    : formatCount(job.placementQueue.size()) + " normal  "
+                        + formatCount(job.gravityPlacementQueue.size()) + " gravity  "
+                        + job.blockEntityQueue.size() + " block entities"
+            ).withStyle(ChatFormatting.WHITE)),
+            false);
+
+        if (job.failureReason != null && !job.failureReason.isBlank()) {
+            source.sendSuccess(() -> SchemMessages.warning("Failure: " + job.failureReason), false);
+        }
+    }
+
+    private static ChatFormatting stateColor(SchematicPasteJob.State state) {
+        return switch (state) {
+            case RUNNING -> ChatFormatting.GREEN;
+            case ROLLING_BACK -> ChatFormatting.GOLD;
+            case PAUSED -> ChatFormatting.YELLOW;
+            case CANCELLED, FAILED -> ChatFormatting.RED;
+            case DONE -> ChatFormatting.DARK_GRAY;
+        };
+    }
+
+    private static String progressBar(int pct, int width) {
+        int filled = pct * width / 100;
+        return "#".repeat(filled) + "-".repeat(width - filled);
+    }
+
+    private static String formatCount(int count) {
+        if (count < 1_000) return String.valueOf(count);
+        if (count < 1_000_000) return String.format(Locale.ROOT, "%.1fK", count / 1_000.0);
+        return String.format(Locale.ROOT, "%.2fM", count / 1_000_000.0);
     }
 
     private static String formatFileSize(long bytes) {
@@ -516,22 +727,6 @@ public class SchemCommand {
         return String.format(Locale.ROOT, "%02d:%02d", minutes, seconds);
     }
 
-    private static double throttleFactor(double mspt) {
-        if (!FrameShiftConfig.adaptiveThrottling.get()) {
-            return 1.0D;
-        }
-        if (mspt < 35.0D) {
-            return 1.0D;
-        }
-        if (mspt < 45.0D) {
-            return 0.5D;
-        }
-        if (mspt < 50.0D) {
-            return 0.25D;
-        }
-        return 0.0D;
-    }
-
     @Nullable
     private static SchematicPasteJob findJobByToken(String token) {
         String normalized = token.trim().toUpperCase(Locale.ROOT);
@@ -547,7 +742,6 @@ public class SchemCommand {
         return job.jobId.toString().substring(0, 8).toUpperCase(Locale.ROOT);
     }
 
-    @SuppressWarnings("unchecked")
     private static void reloadConfig(ModConfig config) throws Exception {
         Class<?> trackerClass = Class.forName("net.neoforged.fml.config.ConfigTracker");
         Method loadConfig = trackerClass.getDeclaredMethod("loadConfig", ModConfig.class, Path.class, Function.class);
@@ -568,6 +762,33 @@ public class SchemCommand {
             JobManager.all().stream().map(SchemCommand::shortJobId).toList(),
             builder
         );
+    }
+
+    private static CompletableFuture<Suggestions> suggestRunningJobIds(SuggestionsBuilder builder) {
+        return SharedSuggestionProvider.suggest(
+            JobManager.all().stream()
+                .filter(j -> j.state == SchematicPasteJob.State.RUNNING || j.state == SchematicPasteJob.State.ROLLING_BACK)
+                .map(SchemCommand::shortJobId)
+                .toList(),
+            builder
+        );
+    }
+
+    private static CompletableFuture<Suggestions> suggestPausedJobIds(SuggestionsBuilder builder) {
+        return SharedSuggestionProvider.suggest(
+            JobManager.all().stream()
+                .filter(j -> j.state == SchematicPasteJob.State.PAUSED)
+                .map(SchemCommand::shortJobId)
+                .toList(),
+            builder
+        );
+    }
+
+    // Clears the loaded schematic session when a player disconnects to avoid a memory leak.
+    public static void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
+        if (event.getEntity() instanceof ServerPlayer player) {
+            LOADED_SCHEMATICS.remove(player.getUUID());
+        }
     }
 
     private static UUID sessionKey(CommandSourceStack source) {
