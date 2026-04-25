@@ -861,8 +861,7 @@ public class SchemCommand {
             .append(Component.literal(
                 rollback
                     ? formatCount(job.rollbackQueue.size()) + " rollback entries"
-                    : formatCount(job.placementQueue.size()) + " normal  "
-                        + formatCount(job.gravityPlacementQueue.size()) + " gravity  "
+                    : formatCount(job.placementQueue.size()) + " pending  "
                         + job.blockEntityQueue.size() + " block entities  "
                         + job.connectionFinalizeQueue.size() + " finalize  "
                         + job.entityQueue.size() + " entities"

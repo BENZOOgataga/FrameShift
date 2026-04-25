@@ -12,13 +12,11 @@ import org.jetbrains.annotations.Nullable;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.Semaphore;
 
 // Represents one paste operation from submission through completion and verification.
@@ -62,7 +60,6 @@ public class SchematicPasteJob {
     private final Semaphore queuedPlacementPermits;
 
     public final LinkedBlockingQueue<PlacementTask> placementQueue;
-    public final PriorityBlockingQueue<PlacementTask> gravityPlacementQueue;
     public final ArrayDeque<PlacementTask> blockEntityQueue = new ArrayDeque<>();
     public final ArrayDeque<PlacementTask> connectionFinalizeQueue = new ArrayDeque<>();
     public final ArrayDeque<EntityTask> entityQueue = new ArrayDeque<>();
@@ -109,13 +106,6 @@ public class SchematicPasteJob {
         this.queuedPlacementCapacity = FrameShiftConfig.maxQueuedPlacements.get();
         this.queuedPlacementPermits = new Semaphore(queuedPlacementCapacity, true);
         this.placementQueue = new LinkedBlockingQueue<>(queuedPlacementCapacity);
-        this.gravityPlacementQueue = new PriorityBlockingQueue<>(
-            queuedPlacementCapacity,
-            Comparator
-                .comparingInt((PlacementTask task) -> task.worldPos.getY())
-                .thenComparingInt(task -> task.worldPos.getX())
-                .thenComparingInt(task -> task.worldPos.getZ())
-        );
         this.startedAtNanos = System.nanoTime();
         this.clearPhaseStartedAtNanos = startedAtNanos;
     }
@@ -156,12 +146,6 @@ public class SchematicPasteJob {
         totalBlocks++;
     }
 
-    public void enqueueGravityPlacement(PlacementTask task) throws InterruptedException {
-        queuedPlacementPermits.acquire();
-        gravityPlacementQueue.put(task);
-        totalBlocks++;
-    }
-
     // Marks producer completion so tick logic can finish once queues drain.
     public void markLoadingComplete() {
         loadingComplete = true;
@@ -172,7 +156,7 @@ public class SchematicPasteJob {
         if (rollbackMode) {
             return rollbackQueue.size();
         }
-        return placementQueue.size() + gravityPlacementQueue.size() + blockEntityQueue.size() + connectionFinalizeQueue.size() + entityQueue.size();
+        return placementQueue.size() + blockEntityQueue.size() + connectionFinalizeQueue.size() + entityQueue.size();
     }
 
     public void observeProgress(long nowNanos) {
@@ -272,22 +256,8 @@ public class SchematicPasteJob {
     }
 
     @Nullable
-    public PlacementTask peekGravityPlacement() {
-        return gravityPlacementQueue.peek();
-    }
-
-    @Nullable
     public PlacementTask pollNormalPlacement() {
         PlacementTask task = placementQueue.poll();
-        if (task != null) {
-            queuedPlacementPermits.release();
-        }
-        return task;
-    }
-
-    @Nullable
-    public PlacementTask pollGravityPlacement() {
-        PlacementTask task = gravityPlacementQueue.poll();
         if (task != null) {
             queuedPlacementPermits.release();
         }
@@ -322,9 +292,8 @@ public class SchematicPasteJob {
     }
 
     private void clearQueuedPlacements() {
-        int cleared = placementQueue.size() + gravityPlacementQueue.size();
+        int cleared = placementQueue.size();
         placementQueue.clear();
-        gravityPlacementQueue.clear();
         if (cleared > 0) {
             queuedPlacementPermits.release(cleared);
         }

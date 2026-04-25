@@ -14,7 +14,6 @@ import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.StringTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.world.level.block.FallingBlock;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import org.jetbrains.annotations.Nullable;
@@ -271,11 +270,7 @@ public final class SchematicLoader {
                             normalizeBlockEntityTag(entry.blockEntityNbt, worldPos.getX(), worldPos.getY(), worldPos.getZ()),
                             0
                         );
-                        if (state.getBlock() instanceof FallingBlock) {
-                            job.enqueueGravityPlacement(task);
-                        } else {
-                            job.enqueuePlacement(task);
-                        }
+                        job.enqueuePlacement(task);
                         placeableBlocks++;
                     }
                 }

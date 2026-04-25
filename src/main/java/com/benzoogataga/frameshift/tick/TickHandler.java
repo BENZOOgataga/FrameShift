@@ -82,19 +82,13 @@ public class TickHandler {
                 if (job.isClearingPhase()) {
                     // Clear phase: drain only the placement queue (AIR blocks, top-down order).
                     if (job.peekNormalPlacement() == null) break;
-                    didPlace = placeNext(job, false);
+                    didPlace = placeNext(job);
                 } else {
-                    // Placement phase: interleave both queues by Y so every block's support is
-                    // already placed before it is placed. Non-gravity wins ties at the same Y,
-                    // ensuring e.g. a torch is placed after the gravity block it attaches to.
-                    SchematicPasteJob.PlacementTask normalHead = job.peekNormalPlacement();
-                    SchematicPasteJob.PlacementTask gravityHead = job.peekGravityPlacement();
-                    if (normalHead == null && gravityHead == null) break;
-                    boolean pickNormal = gravityHead == null
-                        || (normalHead != null && normalHead.worldPos.getY() <= gravityHead.worldPos.getY());
-                    didPlace = pickNormal
-                        ? placeNext(job, false)
-                        : placeNext(job, true);
+                    // Placement phase: drain the single Y-ascending queue. The schematic stream
+                    // guarantees bottom-up order, so falling blocks always have their support placed
+                    // before them without needing a separate sorted queue.
+                    if (job.peekNormalPlacement() == null) break;
+                    didPlace = placeNext(job);
                 }
                 if (!didPlace) break;
                 processed++;
@@ -136,7 +130,6 @@ public class TickHandler {
 
             if (job.loadingComplete
                 && job.placementQueue.isEmpty()
-                && job.gravityPlacementQueue.isEmpty()
                 && job.blockEntityQueue.isEmpty()
                 && job.connectionFinalizeQueue.isEmpty()) {
                 int entityBudget = Math.max(1, (int) Math.floor(FrameShiftConfig.maxEntitiesPerTick.get() * throttle));
@@ -153,7 +146,6 @@ public class TickHandler {
 
             if (job.loadingComplete
                 && job.placementQueue.isEmpty()
-                && job.gravityPlacementQueue.isEmpty()
                 && job.blockEntityQueue.isEmpty()
                 && job.connectionFinalizeQueue.isEmpty()
                 && job.entityQueue.isEmpty()) {
@@ -179,11 +171,8 @@ public class TickHandler {
         return elapsedMillis < FrameShiftConfig.maxMillisPerTick.get();
     }
 
-    private static boolean placeNext(
-        SchematicPasteJob job,
-        boolean gravityQueue
-    ) {
-        SchematicPasteJob.PlacementTask task = gravityQueue ? job.peekGravityPlacement() : job.peekNormalPlacement();
+    private static boolean placeNext(SchematicPasteJob job) {
+        SchematicPasteJob.PlacementTask task = job.peekNormalPlacement();
         if (task == null) {
             return false;
         }
@@ -198,7 +187,7 @@ public class TickHandler {
             }
         }
 
-        task = gravityQueue ? job.pollGravityPlacement() : job.pollNormalPlacement();
+        task = job.pollNormalPlacement();
         if (task == null) {
             return false;
         }
