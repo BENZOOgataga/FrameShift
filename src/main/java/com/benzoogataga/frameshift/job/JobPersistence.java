@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Stream;
 
@@ -47,6 +48,8 @@ public final class JobPersistence {
         int blocksRetried;
         int blocksFailed;
         int blockEntitiesApplied;
+        int entitiesApplied;
+        int entitiesFailed;
         int rollbackQueued;
         int rollbackApplied;
         int rollbackSkippedConflicts;
@@ -76,6 +79,8 @@ public final class JobPersistence {
         int blocksRetried,
         int blocksFailed,
         int blockEntitiesApplied,
+        int entitiesApplied,
+        int entitiesFailed,
         int rollbackQueued,
         int rollbackApplied,
         int rollbackSkippedConflicts,
@@ -130,6 +135,8 @@ public final class JobPersistence {
             json.blocksRetried = job.blocksRetried;
             json.blocksFailed = job.blocksFailed;
             json.blockEntitiesApplied = job.blockEntitiesApplied;
+            json.entitiesApplied = job.entitiesApplied;
+            json.entitiesFailed = job.entitiesFailed;
             json.rollbackQueued = job.rollbackQueued;
             json.rollbackApplied = job.rollbackApplied;
             json.rollbackSkippedConflicts = job.rollbackSkippedConflicts;
@@ -182,6 +189,8 @@ public final class JobPersistence {
                             json.blocksRetried,
                             json.blocksFailed,
                             json.blockEntitiesApplied,
+                            json.entitiesApplied,
+                            json.entitiesFailed,
                             json.rollbackQueued,
                             json.rollbackApplied,
                             json.rollbackSkippedConflicts,
@@ -200,7 +209,26 @@ public final class JobPersistence {
 
     // Removes a persisted job directory once the job has fully completed or fully rolled back.
     public static void delete(UUID jobId, Path serverRoot) {
-        Path dir = jobDir(serverRoot, jobId);
+        deleteDirectory(jobDir(serverRoot, jobId));
+    }
+
+    // Finds persisted job directories that are safe to remove because they are broken or stale.
+    public static List<CleanupCandidate> cleanupCandidates(Path serverRoot, Set<UUID> activeJobIds) {
+        Path dir = jobsDir(serverRoot);
+        if (!Files.isDirectory(dir)) return List.of();
+        List<CleanupCandidate> result = new ArrayList<>();
+        try (Stream<Path> entries = Files.list(dir)) {
+            entries.filter(Files::isDirectory)
+                .sorted(Comparator.comparing(path -> path.getFileName().toString()))
+                .forEach(jobDir -> inspectCleanupCandidate(jobDir, activeJobIds, result));
+        } catch (IOException e) {
+            FrameShift.LOGGER.error("Failed to scan persisted jobs for cleanup: {}", e.getMessage());
+        }
+        return result;
+    }
+
+    // Deletes one persisted job directory by absolute path.
+    public static void deleteDirectory(Path dir) {
         if (!Files.exists(dir)) {
             return;
         }
@@ -213,7 +241,68 @@ public final class JobPersistence {
                 }
             });
         } catch (IOException e) {
-            FrameShift.LOGGER.warn("Failed to delete persisted job directory for {}: {}", jobId, e.getMessage());
+            FrameShift.LOGGER.warn("Failed to delete persisted job directory {}: {}", dir, e.getMessage());
+        }
+    }
+
+    private static void inspectCleanupCandidate(Path dir, Set<UUID> activeJobIds, List<CleanupCandidate> result) {
+        String dirName = dir.getFileName().toString();
+        UUID jobId = null;
+        try {
+            jobId = UUID.fromString(dirName);
+        } catch (IllegalArgumentException ignored) {
+        }
+        if (jobId != null && activeJobIds.contains(jobId)) {
+            return;
+        }
+
+        Path metadata = dir.resolve("job.json");
+        Path rollbackLog = dir.resolve("rollback.log");
+        if (!Files.isRegularFile(metadata)) {
+            result.add(new CleanupCandidate(jobId, dir, "missing job.json"));
+            return;
+        }
+
+        try {
+            JobJson json = GSON.fromJson(Files.readString(metadata), JobJson.class);
+            if (json == null || json.jobId == null || json.schematicPath == null || json.state == null) {
+                result.add(new CleanupCandidate(jobId, dir, "malformed job.json"));
+                return;
+            }
+
+            UUID jsonJobId = UUID.fromString(json.jobId);
+            if (jobId != null && !jobId.equals(jsonJobId)) {
+                result.add(new CleanupCandidate(jsonJobId, dir, "directory/job.json ID mismatch"));
+                return;
+            }
+            if (activeJobIds.contains(jsonJobId)) {
+                return;
+            }
+
+            SchematicPasteJob.State state = SchematicPasteJob.State.valueOf(json.state);
+            if (state == SchematicPasteJob.State.DONE
+                || state == SchematicPasteJob.State.CANCELLED
+                || state == SchematicPasteJob.State.FAILED) {
+                result.add(new CleanupCandidate(jsonJobId, dir, "final state " + state.name().toLowerCase()));
+                return;
+            }
+
+            if (!Files.isRegularFile(Path.of(json.schematicPath))) {
+                result.add(new CleanupCandidate(jsonJobId, dir, "missing schematic file"));
+                return;
+            }
+            if ((json.rollbackMode || state == SchematicPasteJob.State.ROLLING_BACK || json.rollbackQueued > 0)
+                && !Files.isRegularFile(rollbackLog)) {
+                result.add(new CleanupCandidate(jsonJobId, dir, "missing rollback.log"));
+            }
+        } catch (IOException | JsonSyntaxException | IllegalArgumentException e) {
+            result.add(new CleanupCandidate(jobId, dir, "unreadable job.json: " + e.getMessage()));
+        }
+    }
+
+    public record CleanupCandidate(@Nullable UUID jobId, Path directory, String reason) {
+        public String displayId() {
+            return jobId != null ? jobId.toString() : directory.getFileName().toString();
         }
     }
 }

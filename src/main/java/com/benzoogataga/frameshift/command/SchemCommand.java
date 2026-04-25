@@ -214,6 +214,10 @@ public class SchemCommand {
                             context.getSource(),
                             StringArgumentType.getString(context, "jobId")
                         ))))
+                .then(Commands.literal("cleanup")
+                    .executes(context -> executeCleanup(context.getSource(), false))
+                    .then(Commands.literal("apply")
+                        .executes(context -> executeCleanup(context.getSource(), true))))
                 .then(Commands.literal("reload")
                     .executes(context -> executeReload(context.getSource(), loader)))
         );
@@ -397,7 +401,7 @@ public class SchemCommand {
             ), false);
         }
 
-        loader.streamPasteIntoJobAsync(source.getLevel(), loaded.file, new SchematicReadOptions(true, true, false), job)
+        loader.streamPasteIntoJobAsync(source.getLevel(), loaded.file, new SchematicReadOptions(true, true, true), job)
             .thenAcceptAsync(summary -> {
                 source.sendSuccess(() -> SchemMessages.info(
                     "Streamed " + loaded.name + " (" + job.displayTotalBlocks + " placeable blocks)."
@@ -708,6 +712,38 @@ public class SchemCommand {
         return Command.SINGLE_SUCCESS;
     }
 
+    private static int executeCleanup(CommandSourceStack source, boolean apply) {
+        java.util.Set<UUID> activeJobIds = JobManager.all().stream().map(job -> job.jobId).collect(java.util.stream.Collectors.toSet());
+        java.util.List<JobPersistence.CleanupCandidate> candidates =
+            JobPersistence.cleanupCandidates(source.getServer().getServerDirectory(), activeJobIds);
+
+        if (candidates.isEmpty()) {
+            source.sendSuccess(() -> SchemMessages.info("No persisted job directories need cleanup."), false);
+            return Command.SINGLE_SUCCESS;
+        }
+
+        if (!apply) {
+            source.sendSuccess(() -> SchemMessages.warning(
+                "Cleanup preview: " + candidates.size() + " persisted job director" + (candidates.size() == 1 ? "y" : "ies") + " can be removed."
+            ), false);
+            for (JobPersistence.CleanupCandidate candidate : candidates) {
+                source.sendSuccess(() -> SchemMessages.prefix()
+                    .append(Component.literal(candidate.displayId() + "  ").withStyle(ChatFormatting.AQUA))
+                    .append(Component.literal(candidate.reason()).withStyle(ChatFormatting.WHITE)), false);
+            }
+            source.sendSuccess(() -> SchemMessages.info("Run /schem cleanup apply to delete them."), false);
+            return Command.SINGLE_SUCCESS;
+        }
+
+        for (JobPersistence.CleanupCandidate candidate : candidates) {
+            JobPersistence.deleteDirectory(candidate.directory());
+        }
+        source.sendSuccess(() -> SchemMessages.success(
+            "Removed " + candidates.size() + " persisted job director" + (candidates.size() == 1 ? "y" : "ies") + "."
+        ), true);
+        return Command.SINGLE_SUCCESS;
+    }
+
     private static Component buildCompactStatusLine(SchematicPasteJob job) {
         boolean rollback = job.rollbackMode;
         boolean clearing = !rollback && job.isClearingPhase();
@@ -806,7 +842,9 @@ public class SchemCommand {
                 .append(Component.literal("Failed: ").withStyle(ChatFormatting.GRAY))
                 .append(Component.literal(formatCount(job.blocksFailed) + "  ").withStyle(job.blocksFailed > 0 ? ChatFormatting.RED : ChatFormatting.WHITE))
                 .append(Component.literal("Block entities: ").withStyle(ChatFormatting.GRAY))
-                .append(Component.literal(Integer.toString(job.blockEntitiesApplied)).withStyle(ChatFormatting.WHITE)),
+                .append(Component.literal(Integer.toString(job.blockEntitiesApplied) + "  ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal("Entities: ").withStyle(ChatFormatting.GRAY))
+                .append(Component.literal(Integer.toString(job.entitiesApplied)).withStyle(ChatFormatting.WHITE)),
                 false);
 
             if (job.clearOperationsTotal > 0) {
@@ -826,7 +864,8 @@ public class SchemCommand {
                     : formatCount(job.placementQueue.size()) + " normal  "
                         + formatCount(job.gravityPlacementQueue.size()) + " gravity  "
                         + job.blockEntityQueue.size() + " block entities  "
-                        + job.connectionFinalizeQueue.size() + " finalize"
+                        + job.connectionFinalizeQueue.size() + " finalize  "
+                        + job.entityQueue.size() + " entities"
             ).withStyle(ChatFormatting.WHITE)),
             false);
 

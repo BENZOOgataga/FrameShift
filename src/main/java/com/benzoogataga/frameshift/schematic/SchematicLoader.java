@@ -9,6 +9,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.DoubleTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.StringTag;
 import net.minecraft.nbt.Tag;
@@ -283,6 +284,16 @@ public final class SchematicLoader {
                 job.displayTotalBlocks = placeableBlocks;
                 job.expectedTotalBlocks = (int) Math.min(clearOps + placeableBlocks, Integer.MAX_VALUE);
 
+                int entityIndex = 0;
+                for (CompoundTag entityTag : reader.readEntities(file, options)) {
+                    if (entityIndex++ < job.entitiesApplied) {
+                        continue;
+                    }
+                    job.entityQueue.addLast(new SchematicPasteJob.EntityTask(
+                        normalizeEntityTag(entityTag, job.origin)
+                    ));
+                }
+
                 if (!invalidStateIds.isEmpty()) {
                     FrameShift.LOGGER.warn(
                         "Schematic {} has {} invalid palette states ({} block placements skipped)",
@@ -494,6 +505,59 @@ public final class SchematicLoader {
             sanitizeSignTag(normalized);
         }
         return normalized;
+    }
+
+    private static CompoundTag normalizeEntityTag(CompoundTag schematicTag, BlockPos origin) {
+        CompoundTag normalized = schematicTag.copy();
+        normalizeEntityPosition(normalized, origin);
+        stripEntityIdentity(normalized);
+        return normalized;
+    }
+
+    private static void normalizeEntityPosition(CompoundTag tag, BlockPos origin) {
+        if (tag.contains("Pos", Tag.TAG_LIST)) {
+            ListTag pos = tag.getList("Pos", Tag.TAG_DOUBLE);
+            if (pos.size() >= 3) {
+                ListTag normalizedPos = new ListTag();
+                normalizedPos.add(DoubleTag.valueOf(pos.getDouble(0) + origin.getX()));
+                normalizedPos.add(DoubleTag.valueOf(pos.getDouble(1) + origin.getY()));
+                normalizedPos.add(DoubleTag.valueOf(pos.getDouble(2) + origin.getZ()));
+                tag.put("Pos", normalizedPos);
+            }
+        }
+
+        if (tag.contains("TileX", Tag.TAG_INT)) {
+            tag.putInt("TileX", tag.getInt("TileX") + origin.getX());
+        }
+        if (tag.contains("TileY", Tag.TAG_INT)) {
+            tag.putInt("TileY", tag.getInt("TileY") + origin.getY());
+        }
+        if (tag.contains("TileZ", Tag.TAG_INT)) {
+            tag.putInt("TileZ", tag.getInt("TileZ") + origin.getZ());
+        }
+        if (tag.contains("FacingTileX", Tag.TAG_INT)) {
+            tag.putInt("FacingTileX", tag.getInt("FacingTileX") + origin.getX());
+        }
+        if (tag.contains("FacingTileY", Tag.TAG_INT)) {
+            tag.putInt("FacingTileY", tag.getInt("FacingTileY") + origin.getY());
+        }
+        if (tag.contains("FacingTileZ", Tag.TAG_INT)) {
+            tag.putInt("FacingTileZ", tag.getInt("FacingTileZ") + origin.getZ());
+        }
+    }
+
+    private static void stripEntityIdentity(CompoundTag tag) {
+        tag.remove("UUID");
+        tag.remove("UUIDMost");
+        tag.remove("UUIDLeast");
+        if (tag.contains("Passengers", Tag.TAG_LIST)) {
+            ListTag passengers = tag.getList("Passengers", Tag.TAG_COMPOUND);
+            for (Tag passenger : passengers) {
+                if (passenger instanceof CompoundTag passengerTag) {
+                    stripEntityIdentity(passengerTag);
+                }
+            }
+        }
     }
 
     private static void sanitizeSignTag(CompoundTag tag) {

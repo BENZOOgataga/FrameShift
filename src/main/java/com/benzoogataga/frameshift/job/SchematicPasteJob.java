@@ -65,6 +65,7 @@ public class SchematicPasteJob {
     public final PriorityBlockingQueue<PlacementTask> gravityPlacementQueue;
     public final ArrayDeque<PlacementTask> blockEntityQueue = new ArrayDeque<>();
     public final ArrayDeque<PlacementTask> connectionFinalizeQueue = new ArrayDeque<>();
+    public final ArrayDeque<EntityTask> entityQueue = new ArrayDeque<>();
     public final ArrayDeque<RollbackTask> rollbackQueue = new ArrayDeque<>();
     public final Map<Long, RollbackTask> rollbackIndex = new HashMap<>();
 
@@ -79,6 +80,8 @@ public class SchematicPasteJob {
     public int blocksRetried;
     public int blocksFailed;
     public int blockEntitiesApplied;
+    public int entitiesApplied;
+    public int entitiesFailed;
     public int rollbackQueued;
     public int rollbackApplied;
     public int rollbackSkippedConflicts;
@@ -135,6 +138,7 @@ public class SchematicPasteJob {
         this.placePhaseObserved = true;
         clearQueuedPlacements();
         this.blockEntityQueue.clear();
+        this.entityQueue.clear();
         for (PreparedBlockPlacement block : prepared.blocks) {
             BlockPos worldPos = origin.offset(block.relativePos);
             if (!reservePlacementCapacity()) {
@@ -168,7 +172,7 @@ public class SchematicPasteJob {
         if (rollbackMode) {
             return rollbackQueue.size();
         }
-        return placementQueue.size() + gravityPlacementQueue.size() + blockEntityQueue.size() + connectionFinalizeQueue.size();
+        return placementQueue.size() + gravityPlacementQueue.size() + blockEntityQueue.size() + connectionFinalizeQueue.size() + entityQueue.size();
     }
 
     public void observeProgress(long nowNanos) {
@@ -258,6 +262,7 @@ public class SchematicPasteJob {
         clearQueuedPlacements();
         blockEntityQueue.clear();
         connectionFinalizeQueue.clear();
+        entityQueue.clear();
         loadingComplete = true;
     }
 
@@ -342,6 +347,15 @@ public class SchematicPasteJob {
 
         public PlacementTask retry() {
             return new PlacementTask(worldPos, state, blockEntityTag == null ? null : blockEntityTag.copy(), attempts + 1);
+        }
+    }
+
+    // Stores one entity NBT payload ready to spawn after block placement has finished.
+    public static final class EntityTask {
+        public final CompoundTag entityTag;
+
+        public EntityTask(CompoundTag entityTag) {
+            this.entityTag = entityTag.copy();
         }
     }
 

@@ -129,6 +129,8 @@ public class FrameShift {
             job.blocksRetried = saved.blocksRetried();
             job.blocksFailed = saved.blocksFailed();
             job.blockEntitiesApplied = saved.blockEntitiesApplied();
+            job.entitiesApplied = saved.entitiesApplied();
+            job.entitiesFailed = saved.entitiesFailed();
             job.rollbackQueued = saved.rollbackQueued();
             job.rollbackApplied = saved.rollbackApplied();
             job.rollbackSkippedConflicts = saved.rollbackSkippedConflicts();
@@ -166,7 +168,7 @@ public class FrameShift {
                 job.state = saved.state() == SchematicPasteJob.State.PAUSED
                     ? SchematicPasteJob.State.PAUSED
                     : SchematicPasteJob.State.RUNNING;
-                loader.streamPasteIntoJobAsync(level, saved.schematicPath(), new SchematicReadOptions(true, true, false), job)
+                loader.streamPasteIntoJobAsync(level, saved.schematicPath(), new SchematicReadOptions(true, true, true), job)
                     .thenAcceptAsync(summary -> LOGGER.info(
                         "Resumed FrameShift job {} for {} ({} placeable blocks)",
                         job.jobId,

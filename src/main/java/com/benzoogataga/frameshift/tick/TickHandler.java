@@ -8,6 +8,7 @@ import com.benzoogataga.frameshift.job.JobPersistence;
 import com.benzoogataga.frameshift.job.RollbackStore;
 import com.benzoogataga.frameshift.job.SchematicPasteJob;
 import net.minecraft.ChatFormatting;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtUtils;
@@ -15,6 +16,8 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.CrossCollisionBlock;
@@ -131,13 +134,29 @@ public class TickHandler {
                 finalized++;
             }
 
+            if (job.loadingComplete
+                && job.placementQueue.isEmpty()
+                && job.gravityPlacementQueue.isEmpty()
+                && job.blockEntityQueue.isEmpty()
+                && job.connectionFinalizeQueue.isEmpty()) {
+                int entityBudget = Math.max(1, (int) Math.floor(FrameShiftConfig.maxEntitiesPerTick.get() * throttle));
+                int entitiesProcessed = 0;
+                while (entitiesProcessed < entityBudget && withinBudget(tickStartNanos)) {
+                    if (!spawnNextEntity(job)) {
+                        break;
+                    }
+                    entitiesProcessed++;
+                }
+            }
+
             job.observeProgress(System.nanoTime());
 
             if (job.loadingComplete
                 && job.placementQueue.isEmpty()
                 && job.gravityPlacementQueue.isEmpty()
                 && job.blockEntityQueue.isEmpty()
-                && job.connectionFinalizeQueue.isEmpty()) {
+                && job.connectionFinalizeQueue.isEmpty()
+                && job.entityQueue.isEmpty()) {
                 job.state = SchematicPasteJob.State.DONE;
                 FrameShift.LOGGER.info("Paste job {} finished for schematic {}", job.jobId, job.schematicName);
                 notifyComplete(server, job);
@@ -306,6 +325,32 @@ public class TickHandler {
         return true;
     }
 
+    private static boolean spawnNextEntity(SchematicPasteJob job) {
+        SchematicPasteJob.EntityTask task = job.entityQueue.pollFirst();
+        if (task == null) {
+            return false;
+        }
+
+        BlockPos entityPos = entityBlockPos(task.entityTag);
+        if (!ChunkHelper.isLoaded(job.level, entityPos)) {
+            if (FrameShiftConfig.preloadChunks.get() && ChunkHelper.ensureLoaded(job.level, entityPos)) {
+                // chunk is now loaded, continue this tick
+            } else {
+                job.entityQueue.addFirst(task);
+                job.state = SchematicPasteJob.State.PAUSED;
+                job.autoPaused = true;
+                return false;
+            }
+        }
+
+        if (spawnEntity(job.level, task.entityTag)) {
+            job.entitiesApplied++;
+        } else {
+            job.entitiesFailed++;
+        }
+        return true;
+    }
+
     private static void processRollback(SchematicPasteJob job, long tickStartNanos) {
         double mspt = job.level.getServer().getAverageTickTimeNanos() / 1_000_000.0D;
         double throttle = FrameShiftConfig.throttleFactor(mspt);
@@ -386,6 +431,34 @@ public class TickHandler {
         if (!fluidState.isEmpty()) {
             level.scheduleTick(pos, fluidState.getType(), fluidState.getType().getTickDelay(level));
         }
+    }
+
+    private static BlockPos entityBlockPos(CompoundTag entityTag) {
+        if (entityTag.contains("Pos", 9)) {
+            net.minecraft.nbt.ListTag pos = entityTag.getList("Pos", 6);
+            if (pos.size() >= 3) {
+                return BlockPos.containing(pos.getDouble(0), pos.getDouble(1), pos.getDouble(2));
+            }
+        }
+        return new BlockPos(
+            entityTag.getInt("TileX"),
+            entityTag.getInt("TileY"),
+            entityTag.getInt("TileZ")
+        );
+    }
+
+    private static boolean spawnEntity(ServerLevel level, CompoundTag entityTag) {
+        Entity entity = EntityType.loadEntityRecursive(entityTag.copy(), level, loaded -> {
+            BlockPos pos = entityBlockPos(entityTag);
+            if (entityTag.contains("Pos", 9)) {
+                net.minecraft.nbt.ListTag posList = entityTag.getList("Pos", 6);
+                loaded.moveTo(posList.getDouble(0), posList.getDouble(1), posList.getDouble(2), loaded.getYRot(), loaded.getXRot());
+            } else {
+                loaded.moveTo(pos.getX() + 0.5D, pos.getY(), pos.getZ() + 0.5D, loaded.getYRot(), loaded.getXRot());
+            }
+            return loaded;
+        });
+        return entity != null && level.tryAddFreshEntityWithPassengers(entity);
     }
 
     private static void sendHud(MinecraftServer server, SchematicPasteJob job) {
