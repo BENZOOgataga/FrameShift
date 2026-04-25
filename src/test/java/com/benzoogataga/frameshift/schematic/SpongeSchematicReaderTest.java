@@ -208,23 +208,28 @@ class SpongeSchematicReaderTest {
         return root;
     }
 
-    private static CompoundTag spongeV3(int width, int height, int length, int dataVersion, int blockEntities, int entities) {
+    private static CompoundTag spongeV3(int width, int height, int length, int dataVersion, int blockEntityCount, int entityCount) {
         CompoundTag root = new CompoundTag();
         CompoundTag schematic = new CompoundTag();
         CompoundTag blocks = new CompoundTag();
         ListTag blockEntityList = new ListTag();
         ListTag entityList = new ListTag();
 
-        for (int index = 0; index < blockEntities; index++) {
-            blockEntityList.add(new CompoundTag());
+        for (int index = 0; index < blockEntityCount; index++) {
+            CompoundTag be = new CompoundTag();
+            be.put("Pos", new IntArrayTag(new int[]{ index, 0, 0 }));
+            be.putString("Id", "minecraft:chest");
+            blockEntityList.add(be);
         }
-        for (int index = 0; index < entities; index++) {
-            entityList.add(new CompoundTag());
+        for (int index = 0; index < entityCount; index++) {
+            CompoundTag entity = new CompoundTag();
+            entity.putString("Id", "minecraft:item_frame");
+            entityList.add(entity);
         }
 
-        blocks.put("BlockEntities", blockEntityList);
         blocks.put("Palette", palette());
         blocks.putByteArray("Data", encodeVarInts(List.of(0)));
+        blocks.put("BlockEntities", blockEntityList);
         schematic.putInt("Version", 3);
         schematic.putInt("DataVersion", dataVersion);
         schematic.putShort("Width", (short) width);
