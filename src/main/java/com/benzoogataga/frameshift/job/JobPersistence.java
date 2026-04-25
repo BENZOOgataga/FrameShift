@@ -35,6 +35,7 @@ public final class JobPersistence {
         int originZ;
         boolean skipClear;
         boolean freezeGravity;
+        boolean disableRollbackSnapshots;
         @Nullable String executorUuid;
         String state;
         boolean rollbackMode;
@@ -66,6 +67,7 @@ public final class JobPersistence {
         BlockPos origin,
         boolean skipClear,
         boolean freezeGravity,
+        boolean disableRollbackSnapshots,
         @Nullable UUID executorUuid,
         SchematicPasteJob.State state,
         boolean rollbackMode,
@@ -122,6 +124,7 @@ public final class JobPersistence {
             json.originZ = job.origin.getZ();
             json.skipClear = job.skipClear;
             json.freezeGravity = job.freezeGravity;
+            json.disableRollbackSnapshots = job.disableRollbackSnapshots;
             json.executorUuid = job.executorUuid != null ? job.executorUuid.toString() : null;
             json.state = job.state.name();
             json.rollbackMode = job.rollbackMode;
@@ -176,6 +179,7 @@ public final class JobPersistence {
                             new BlockPos(json.originX, json.originY, json.originZ),
                             json.skipClear,
                             json.freezeGravity,
+                            json.disableRollbackSnapshots,
                             json.executorUuid != null ? UUID.fromString(json.executorUuid) : null,
                             SchematicPasteJob.State.valueOf(json.state),
                             json.rollbackMode,
@@ -232,15 +236,18 @@ public final class JobPersistence {
         if (!Files.exists(dir)) {
             return;
         }
+        RollbackStore.onJobDirectoryDeleted(dir);
         try (Stream<Path> walk = Files.walk(dir)) {
             walk.sorted(Comparator.reverseOrder()).forEach(path -> {
                 try {
                     Files.deleteIfExists(path);
                 } catch (IOException e) {
+                    RollbackStore.invalidateCachedTotalRollbackBytes();
                     FrameShift.LOGGER.warn("Failed to delete persisted path {}: {}", path, e.getMessage());
                 }
             });
         } catch (IOException e) {
+            RollbackStore.invalidateCachedTotalRollbackBytes();
             FrameShift.LOGGER.warn("Failed to delete persisted job directory {}: {}", dir, e.getMessage());
         }
     }

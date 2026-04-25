@@ -11,6 +11,7 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtUtils;
 import net.minecraft.nbt.TagParser;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import org.jetbrains.annotations.Nullable;
@@ -23,6 +24,9 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
 
 // Owns on-disk rollback snapshot storage and reconstructs rollback state on startup.
@@ -32,11 +36,16 @@ public final class RollbackStore {
     private static final String SNAPSHOT = "snapshot";
     private static final String UPDATE = "update";
     private static final int FLUSH_THRESHOLD_BYTES = 128 * 1024;
+    // Caches total rollback bytes already written under frameshift/jobs to avoid rescanning on every block placement.
+    private static final AtomicLong cachedTotalRollbackBytes = new AtomicLong(-1L);
+    // Caches SNBT block-state payloads because rollback logging serializes the same states many times.
+    private static final Map<BlockState, String> blockStateSnbtCache = new ConcurrentHashMap<>();
 
     private RollbackStore() {}
 
     // Ensures this job has a storage directory and rollback log before any snapshots are written.
     public static boolean initializeStorage(SchematicPasteJob job, Path serverRoot) {
+        ensureCachedTotalRollbackBytes(serverRoot);
         try {
             Path jobsDir = JobPersistence.jobsDir(serverRoot);
             Files.createDirectories(jobsDir);
@@ -77,7 +86,8 @@ public final class RollbackStore {
         BlockState expectedState,
         @Nullable CompoundTag expectedBlockEntityTag
     ) {
-        if (!initializeStorage(job, level.getServer().getServerDirectory())) {
+        Path serverRoot = level.getServer().getServerDirectory();
+        if ((job.persistenceDirectory == null || job.rollbackLogPath == null) && !initializeStorage(job, serverRoot)) {
             return false;
         }
 
@@ -102,7 +112,7 @@ public final class RollbackStore {
                     sequence
                 );
 
-                queueLogEntry(level.getServer().getServerDirectory(), job, GSON.toJson(LogEvent.snapshot(created)));
+                queueLogEntry(serverRoot, job, GSON.toJson(LogEvent.snapshot(created)));
 
                 job.rollbackIndex.put(key, created);
                 job.rollbackQueued = job.rollbackIndex.size();
@@ -113,7 +123,7 @@ public final class RollbackStore {
             existing.expectedBlockEntityTag = expectedBlockEntityTag == null ? null : expectedBlockEntityTag.copy();
             existing.hadExpectedBlockEntity = hadExpectedBlockEntity;
             existing.lastTouchedSequence = sequence;
-            queueLogEntry(level.getServer().getServerDirectory(), job, GSON.toJson(LogEvent.update(existing)));
+            queueLogEntry(serverRoot, job, GSON.toJson(LogEvent.update(existing)));
             return true;
         } catch (IOException e) {
             job.state = SchematicPasteJob.State.FAILED;
@@ -148,9 +158,9 @@ public final class RollbackStore {
                         deserializeState(job.level, event.originalState),
                         parseTag(event.originalBlockEntity),
                         event.hadOriginalBlockEntity,
-                        deserializeState(job.level, event.expectedState),
-                        parseTag(event.expectedBlockEntity),
-                        event.hadExpectedBlockEntity,
+                        deserializeExpectedState(job.level, event),
+                        parseExpectedBlockEntity(event),
+                        event.clearsToAir ? false : event.hadExpectedBlockEntity,
                         event.sequence
                     );
                     job.rollbackIndex.put(key, task);
@@ -159,9 +169,9 @@ public final class RollbackStore {
                     if (task == null) {
                         throw new IOException("Rollback update has no matching snapshot for " + event.x + "," + event.y + "," + event.z);
                     }
-                    task.expectedState = deserializeState(job.level, event.expectedState);
-                    task.expectedBlockEntityTag = parseTag(event.expectedBlockEntity);
-                    task.hadExpectedBlockEntity = event.hadExpectedBlockEntity;
+                    task.expectedState = deserializeExpectedState(job.level, event);
+                    task.expectedBlockEntityTag = parseExpectedBlockEntity(event);
+                    task.hadExpectedBlockEntity = event.clearsToAir ? false : event.hadExpectedBlockEntity;
                     task.lastTouchedSequence = event.sequence;
                 } else {
                     throw new IOException("Unknown rollback event type: " + event.type);
@@ -184,6 +194,7 @@ public final class RollbackStore {
         byte[] bytes = payload.getBytes(StandardCharsets.UTF_8);
         Files.write(job.rollbackLogPath, bytes, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         job.rollbackLogBytesOnDisk += bytes.length;
+        cachedTotalRollbackBytes.addAndGet(bytes.length);
         job.pendingRollbackLogEntries.clear();
         job.pendingRollbackLogBytes = 0;
     }
@@ -229,11 +240,26 @@ public final class RollbackStore {
         }
     }
 
+    private static BlockState deserializeExpectedState(ServerLevel level, LogEvent event) throws IOException {
+        if (event.clearsToAir) {
+            return Blocks.AIR.defaultBlockState();
+        }
+        return deserializeState(level, event.expectedState);
+    }
+
+    @Nullable
+    private static CompoundTag parseExpectedBlockEntity(LogEvent event) throws IOException {
+        if (event.clearsToAir) {
+            return null;
+        }
+        return parseTag(event.expectedBlockEntity);
+    }
+
     private static void enforceStorageLimits(Path serverRoot, int appendBytes, SchematicPasteJob job) throws IOException {
         long perJobLimit = FrameShiftConfig.maxRollbackSnapshotBytesPerJob.get();
         long totalLimit = FrameShiftConfig.maxTotalRollbackStorageBytes.get();
         long currentJobBytes = job.rollbackLogBytesOnDisk + job.pendingRollbackLogBytes;
-        long totalBytes = directorySize(JobPersistence.jobsDir(serverRoot));
+        long totalBytes = ensureCachedTotalRollbackBytes(serverRoot);
 
         if (currentJobBytes + appendBytes > perJobLimit) {
             throw new IOException("Per-job rollback snapshot limit exceeded");
@@ -256,6 +282,53 @@ public final class RollbackStore {
                 }
             }).sum();
         }
+    }
+
+    // Returns the cached total rollback bytes on disk, initializing it from disk once per process.
+    private static long ensureCachedTotalRollbackBytes(Path serverRoot) {
+        long cached = cachedTotalRollbackBytes.get();
+        if (cached >= 0L) {
+            return cached;
+        }
+
+        synchronized (cachedTotalRollbackBytes) {
+            cached = cachedTotalRollbackBytes.get();
+            if (cached >= 0L) {
+                return cached;
+            }
+
+            try {
+                cached = directorySize(JobPersistence.jobsDir(serverRoot));
+            } catch (IOException e) {
+                cached = 0L;
+            }
+            cachedTotalRollbackBytes.set(cached);
+            return cached;
+        }
+    }
+
+    // Updates the cached rollback byte total after a persisted job directory is removed.
+    public static void onJobDirectoryDeleted(Path dir) {
+        long cached = cachedTotalRollbackBytes.get();
+        if (cached < 0L || !Files.exists(dir)) {
+            return;
+        }
+
+        try {
+            cachedTotalRollbackBytes.addAndGet(-directorySize(dir));
+        } catch (IOException ignored) {
+            cachedTotalRollbackBytes.set(-1L);
+        }
+    }
+
+    // Forces the next storage-limit check to refresh totals from disk.
+    public static void invalidateCachedTotalRollbackBytes() {
+        cachedTotalRollbackBytes.set(-1L);
+    }
+
+    // Returns the current total rollback bytes already stored on disk under frameshift/jobs.
+    public static long totalRollbackBytes(Path serverRoot) {
+        return ensureCachedTotalRollbackBytes(serverRoot);
     }
 
     private static void queueLogEntry(Path serverRoot, SchematicPasteJob job, String jsonLine) throws IOException {
@@ -281,6 +354,7 @@ public final class RollbackStore {
         @Nullable String expectedState;
         @Nullable String expectedBlockEntity;
         boolean hadExpectedBlockEntity;
+        boolean clearsToAir;
 
         static LogEvent snapshot(SchematicPasteJob.RollbackTask task) {
             LogEvent event = new LogEvent();
@@ -289,12 +363,15 @@ public final class RollbackStore {
             event.y = task.worldPos.getY();
             event.z = task.worldPos.getZ();
             event.sequence = task.lastTouchedSequence;
-            event.originalState = NbtUtils.writeBlockState(task.originalState).toString();
+            event.originalState = serializeBlockState(task.originalState);
             event.originalBlockEntity = task.originalBlockEntityTag == null ? null : task.originalBlockEntityTag.toString();
             event.hadOriginalBlockEntity = task.hadOriginalBlockEntity;
-            event.expectedState = NbtUtils.writeBlockState(task.expectedState).toString();
-            event.expectedBlockEntity = task.expectedBlockEntityTag == null ? null : task.expectedBlockEntityTag.toString();
-            event.hadExpectedBlockEntity = task.hadExpectedBlockEntity;
+            event.clearsToAir = isCompactAirClear(task.expectedState, task.hadExpectedBlockEntity);
+            if (!event.clearsToAir) {
+                event.expectedState = serializeBlockState(task.expectedState);
+                event.expectedBlockEntity = task.expectedBlockEntityTag == null ? null : task.expectedBlockEntityTag.toString();
+                event.hadExpectedBlockEntity = task.hadExpectedBlockEntity;
+            }
             return event;
         }
 
@@ -305,10 +382,22 @@ public final class RollbackStore {
             event.y = task.worldPos.getY();
             event.z = task.worldPos.getZ();
             event.sequence = task.lastTouchedSequence;
-            event.expectedState = NbtUtils.writeBlockState(task.expectedState).toString();
-            event.expectedBlockEntity = task.expectedBlockEntityTag == null ? null : task.expectedBlockEntityTag.toString();
-            event.hadExpectedBlockEntity = task.hadExpectedBlockEntity;
+            event.clearsToAir = isCompactAirClear(task.expectedState, task.hadExpectedBlockEntity);
+            if (!event.clearsToAir) {
+                event.expectedState = serializeBlockState(task.expectedState);
+                event.expectedBlockEntity = task.expectedBlockEntityTag == null ? null : task.expectedBlockEntityTag.toString();
+                event.hadExpectedBlockEntity = task.hadExpectedBlockEntity;
+            }
             return event;
         }
+    }
+
+    // Reuses block-state SNBT strings across rollback entries, which is especially helpful for AIR clears.
+    private static String serializeBlockState(BlockState state) {
+        return blockStateSnbtCache.computeIfAbsent(state, key -> NbtUtils.writeBlockState(key).toString());
+    }
+
+    private static boolean isCompactAirClear(BlockState expectedState, boolean hadExpectedBlockEntity) {
+        return expectedState.is(Blocks.AIR) && !hadExpectedBlockEntity;
     }
 }

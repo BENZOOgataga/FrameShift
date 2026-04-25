@@ -115,6 +115,7 @@ public class FrameShift {
             job.schematicPath = saved.schematicPath();
             job.skipClear = saved.skipClear();
             job.freezeGravity = saved.freezeGravity();
+            job.disableRollbackSnapshots = saved.disableRollbackSnapshots();
             job.persistenceDirectory = JobPersistence.jobDir(serverRoot, saved.jobId());
             job.rollbackLogPath = job.persistenceDirectory.resolve("rollback.log");
             job.rollbackMode = saved.rollbackMode();
@@ -138,12 +139,16 @@ public class FrameShift {
             job.rollbackSequence = saved.rollbackSequence();
 
             try {
-                if ((saved.rollbackMode() || saved.state() == SchematicPasteJob.State.ROLLING_BACK || saved.rollbackQueued() > 0)
+                if (!saved.disableRollbackSnapshots()
+                    && (saved.rollbackMode() || saved.state() == SchematicPasteJob.State.ROLLING_BACK || saved.rollbackQueued() > 0)
                     && !Files.isRegularFile(job.rollbackLogPath)) {
                     throw new IllegalStateException("rollback.log is missing");
                 }
-                RollbackStore.loadRollbackState(job);
-                if ((saved.rollbackMode() || saved.state() == SchematicPasteJob.State.ROLLING_BACK || saved.rollbackQueued() > 0)
+                if (!saved.disableRollbackSnapshots()) {
+                    RollbackStore.loadRollbackState(job);
+                }
+                if (!saved.disableRollbackSnapshots()
+                    && (saved.rollbackMode() || saved.state() == SchematicPasteJob.State.ROLLING_BACK || saved.rollbackQueued() > 0)
                     && job.rollbackIndex.isEmpty()) {
                     throw new IllegalStateException("no rollback snapshots could be reconstructed");
                 }

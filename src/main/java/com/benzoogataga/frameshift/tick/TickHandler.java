@@ -29,11 +29,19 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.FluidState;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.Locale;
 
 // Called at the end of each server tick to advance paste jobs within a time budget.
 public class TickHandler {
+
+    private record PlacementOutcome(
+        PlacementResult result,
+        boolean needsBlockEntityApply,
+        boolean needsConnectionFinalize
+    ) {
+    }
 
     private enum PlacementResult {
         CHANGED,
@@ -94,6 +102,9 @@ public class TickHandler {
                 if (!didPlace) break;
                 processed++;
             }
+            if (processed > 0 && !withinBudget(tickStartNanos)) {
+                job.perfBudgetStops++;
+            }
 
             int blockEntitiesBudget = Math.max(1, (int) Math.floor(FrameShiftConfig.maxBlockEntitiesPerTick.get() * throttle));
             int blockEntitiesProcessed = 0;
@@ -110,23 +121,39 @@ public class TickHandler {
                         job.blockEntityQueue.addFirst(task);
                         job.state = SchematicPasteJob.State.PAUSED;
                         job.autoPaused = true;
+                        job.perfChunkLoadPauses++;
                         break;
                     }
                 }
 
+                long blockEntityStart = System.nanoTime();
                 if (applyBlockEntity(job.level, task)) {
                     job.blockEntitiesApplied++;
                 }
+                job.perfBlockEntityNanos += System.nanoTime() - blockEntityStart;
+                job.perfBlockEntityOps++;
                 blockEntitiesProcessed++;
+            }
+            if (blockEntitiesProcessed > 0 && !withinBudget(tickStartNanos)) {
+                job.perfBudgetStops++;
             }
 
             int finalizeBudget = Math.max(1, targetPlacements / 4);
             int finalized = 0;
             while (finalized < finalizeBudget && withinBudget(tickStartNanos)) {
-                if (!finalizeConnections(job)) {
+                long finalizeStart = System.nanoTime();
+                boolean didFinalize = finalizeConnections(job);
+                if (didFinalize) {
+                    job.perfConnectionFinalizeNanos += System.nanoTime() - finalizeStart;
+                    job.perfConnectionFinalizeOps++;
+                }
+                if (!didFinalize) {
                     break;
                 }
                 finalized++;
+            }
+            if (finalized > 0 && !withinBudget(tickStartNanos)) {
+                job.perfBudgetStops++;
             }
 
             if (job.loadingComplete
@@ -140,6 +167,9 @@ public class TickHandler {
                         break;
                     }
                     entitiesProcessed++;
+                }
+                if (entitiesProcessed > 0 && !withinBudget(tickStartNanos)) {
+                    job.perfBudgetStops++;
                 }
             }
 
@@ -184,6 +214,7 @@ public class TickHandler {
             } else {
                 job.state = SchematicPasteJob.State.PAUSED;
                 job.autoPaused = true;
+                job.perfChunkLoadPauses++;
                 return false;
             }
         }
@@ -193,50 +224,72 @@ public class TickHandler {
             return false;
         }
         job.blocksAttempted++;
-        PlacementResult placementResult = applyBlockState(job, task);
-        if (placementResult == PlacementResult.FAILED) {
+        long placementStart = System.nanoTime();
+        PlacementOutcome outcome = applyBlockState(job, task);
+        job.perfPlacementNanos += System.nanoTime() - placementStart;
+        job.perfPlacementOps++;
+        if (outcome.result == PlacementResult.FAILED) {
             job.blocksFailed++;
             return job.state != SchematicPasteJob.State.FAILED;
         }
 
         boolean isClearTask = task.state.isAir();
-        if (placementResult == PlacementResult.CHANGED && !isClearTask) {
+        if (outcome.result == PlacementResult.CHANGED && !isClearTask) {
             job.blocksPlaced++;
-        } else if (placementResult == PlacementResult.NO_CHANGE && !isClearTask) {
+        } else if (outcome.result == PlacementResult.NO_CHANGE && !isClearTask) {
             job.blocksUnchanged++;
         }
-        if (!isClearTask && task.blockEntityTag != null) {
+        if (!isClearTask && outcome.needsBlockEntityApply) {
             job.blockEntityQueue.addLast(task);
         }
-        if (!isClearTask && needsConnectionFinalize(task.state)) {
+        if (!isClearTask && outcome.needsConnectionFinalize) {
             job.connectionFinalizeQueue.addLast(task);
         }
         job.blocksVerified++;
         return true;
     }
 
-    private static PlacementResult applyBlockState(SchematicPasteJob job, SchematicPasteJob.PlacementTask task) {
+    private static PlacementOutcome applyBlockState(SchematicPasteJob job, SchematicPasteJob.PlacementTask task) {
         ServerLevel level = job.level;
+        BlockState currentState = level.getBlockState(task.worldPos);
+        boolean blockStateMatches = currentState.equals(task.state);
+        boolean needsBlockEntityApply = task.blockEntityTag != null
+            && !blockEntityMatches(level, task.worldPos, task.blockEntityTag);
+        boolean needsConnectionFinalize = needsConnectionFinalize(task.state);
+
+        // When the world already matches the target block, skip mutation and rollback logging entirely.
+        if (blockStateMatches && !needsBlockEntityApply) {
+            return new PlacementOutcome(PlacementResult.NO_CHANGE, false, false);
+        }
+
+        // If only the block entity differs, keep the original block in place and let the BE queue repair it later.
+        if (blockStateMatches) {
+            if (!snapshotBeforeMutationTimed(job, level, task.worldPos, task.state, task.blockEntityTag)) {
+                return new PlacementOutcome(PlacementResult.FAILED, false, false);
+            }
+            return new PlacementOutcome(PlacementResult.NO_CHANGE, true, false);
+        }
+
         int flags = placementFlags(task.state.isAir());
         if (shouldFreezeGravity(job, level, task)) {
             CompoundTag barrierBlockEntity = null;
-            if (!RollbackStore.snapshotBeforeMutation(job, level, task.worldPos.below(), Blocks.BARRIER.defaultBlockState(), barrierBlockEntity)) {
-                return PlacementResult.FAILED;
+            if (!snapshotBeforeMutationTimed(job, level, task.worldPos.below(), Blocks.BARRIER.defaultBlockState(), barrierBlockEntity)) {
+                return new PlacementOutcome(PlacementResult.FAILED, false, false);
             }
             level.setBlock(task.worldPos.below(), Blocks.BARRIER.defaultBlockState(), Block.UPDATE_CLIENTS | Block.UPDATE_SUPPRESS_DROPS);
         }
-        if (!RollbackStore.snapshotBeforeMutation(job, level, task.worldPos, task.state, task.blockEntityTag)) {
-            return PlacementResult.FAILED;
+        if (!snapshotBeforeMutationTimed(job, level, task.worldPos, task.state, task.blockEntityTag)) {
+            return new PlacementOutcome(PlacementResult.FAILED, false, false);
         }
         boolean changed = level.setBlock(task.worldPos, task.state, flags);
         scheduleFluidTickIfNeeded(level, task.worldPos, task.state);
         if (changed) {
-            return PlacementResult.CHANGED;
+            return new PlacementOutcome(PlacementResult.CHANGED, task.blockEntityTag != null, needsConnectionFinalize);
         }
         if (!level.getBlockState(task.worldPos).equals(task.state)) {
-            return PlacementResult.FAILED;
+            return new PlacementOutcome(PlacementResult.FAILED, false, false);
         }
-        return PlacementResult.NO_CHANGE;
+        return new PlacementOutcome(PlacementResult.NO_CHANGE, task.blockEntityTag != null, needsConnectionFinalize);
     }
 
     // Applies schematic states without asking vanilla to immediately revalidate neighbors and fluids.
@@ -271,6 +324,28 @@ public class TickHandler {
         return false;
     }
 
+    private static boolean blockEntityMatches(ServerLevel level, BlockPos worldPos, CompoundTag expectedTag) {
+        CompoundTag currentTag = RollbackStore.captureBlockEntity(level, worldPos);
+        return currentTag != null && NbtUtils.compareNbt(expectedTag, currentTag, false);
+    }
+
+    private static boolean snapshotBeforeMutationTimed(
+        SchematicPasteJob job,
+        ServerLevel level,
+        BlockPos worldPos,
+        BlockState expectedState,
+        @Nullable CompoundTag expectedBlockEntityTag
+    ) {
+        if (job.disableRollbackSnapshots) {
+            return true;
+        }
+        long snapshotStart = System.nanoTime();
+        boolean success = RollbackStore.snapshotBeforeMutation(job, level, worldPos, expectedState, expectedBlockEntityTag);
+        job.perfSnapshotNanos += System.nanoTime() - snapshotStart;
+        job.perfSnapshotOps++;
+        return success;
+    }
+
     private static boolean finalizeConnections(SchematicPasteJob job) {
         SchematicPasteJob.PlacementTask task = job.connectionFinalizeQueue.pollFirst();
         if (task == null) {
@@ -283,6 +358,7 @@ public class TickHandler {
                 job.connectionFinalizeQueue.addFirst(task);
                 job.state = SchematicPasteJob.State.PAUSED;
                 job.autoPaused = true;
+                job.perfChunkLoadPauses++;
                 return false;
             }
         }
@@ -303,7 +379,7 @@ public class TickHandler {
         }
 
         CompoundTag blockEntityTag = RollbackStore.captureBlockEntity(level, task.worldPos);
-        if (!RollbackStore.snapshotBeforeMutation(job, level, task.worldPos, finalizedState, blockEntityTag)) {
+        if (!snapshotBeforeMutationTimed(job, level, task.worldPos, finalizedState, blockEntityTag)) {
             return false;
         }
         if (!level.setBlock(task.worldPos, finalizedState, placementFlags(finalizedState.isAir()))
@@ -329,11 +405,16 @@ public class TickHandler {
                 job.entityQueue.addFirst(task);
                 job.state = SchematicPasteJob.State.PAUSED;
                 job.autoPaused = true;
+                job.perfChunkLoadPauses++;
                 return false;
             }
         }
 
-        if (spawnEntity(job.level, task.entityTag)) {
+        long entityStart = System.nanoTime();
+        boolean spawned = spawnEntity(job.level, task.entityTag);
+        job.perfEntitySpawnNanos += System.nanoTime() - entityStart;
+        job.perfEntitySpawnOps++;
+        if (spawned) {
             job.entitiesApplied++;
         } else {
             job.entitiesFailed++;
@@ -362,14 +443,9 @@ public class TickHandler {
                     job.rollbackQueue.addFirst(task);
                     job.state = SchematicPasteJob.State.PAUSED;
                     job.autoPaused = true;
+                    job.perfChunkLoadPauses++;
                     break;
                 }
-            }
-
-            if (!matchesExpectedState(job.level, task)) {
-                job.rollbackSkippedConflicts++;
-                processed++;
-                continue;
             }
 
             if (restoreOriginalState(job.level, task)) {
@@ -381,23 +457,15 @@ public class TickHandler {
         }
     }
 
-    private static boolean matchesExpectedState(ServerLevel level, SchematicPasteJob.RollbackTask task) {
-        if (!level.getBlockState(task.worldPos).equals(task.expectedState)) {
-            return false;
-        }
-        CompoundTag currentBlockEntityTag = RollbackStore.captureBlockEntity(level, task.worldPos);
-        if (!task.hadExpectedBlockEntity) {
-            return currentBlockEntityTag == null;
-        }
-        return currentBlockEntityTag != null && NbtUtils.compareNbt(task.expectedBlockEntityTag, currentBlockEntityTag, false);
-    }
-
     private static boolean restoreOriginalState(ServerLevel level, SchematicPasteJob.RollbackTask task) {
+        // Cancel should fully undo our touched positions even if fluids or neighbor updates changed them after placement.
         if (!level.setBlock(task.worldPos, task.originalState, placementFlags(task.originalState.isAir()))) {
             if (!level.getBlockState(task.worldPos).equals(task.originalState)) {
                 return false;
             }
         }
+
+        scheduleNearbyFluidTicks(level, task.worldPos, task.originalState);
 
         if (task.hadOriginalBlockEntity && task.originalBlockEntityTag != null) {
             HolderLookup.Provider registries = level.registryAccess();
@@ -421,6 +489,21 @@ public class TickHandler {
         if (!fluidState.isEmpty()) {
             level.scheduleTick(pos, fluidState.getType(), fluidState.getType().getTickDelay(level));
         }
+    }
+
+    // Rechecks fluids around a restored block so leftover thin-water states can collapse after rollback.
+    private static void scheduleNearbyFluidTicks(ServerLevel level, BlockPos center, BlockState centerState) {
+        scheduleFluidTickIfNeeded(level, center, centerState);
+        scheduleFluidTickForCurrentState(level, center.above());
+        scheduleFluidTickForCurrentState(level, center.below());
+        scheduleFluidTickForCurrentState(level, center.north());
+        scheduleFluidTickForCurrentState(level, center.south());
+        scheduleFluidTickForCurrentState(level, center.east());
+        scheduleFluidTickForCurrentState(level, center.west());
+    }
+
+    private static void scheduleFluidTickForCurrentState(ServerLevel level, BlockPos pos) {
+        scheduleFluidTickIfNeeded(level, pos, level.getBlockState(pos));
     }
 
     private static BlockPos entityBlockPos(CompoundTag entityTag) {

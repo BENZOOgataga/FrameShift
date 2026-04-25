@@ -24,6 +24,8 @@ import net.minecraft.commands.SharedSuggestionProvider;
 import net.minecraft.commands.arguments.coordinates.BlockPosArgument;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.ClickEvent;
+import net.minecraft.network.chat.HoverEvent;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.fml.config.ModConfig;
@@ -51,7 +53,14 @@ public class SchemCommand {
     private static final float DEFAULT_FLY_SPEED = 0.05F;
     private static final float MIN_FLY_SPEED = 0.01F;
     private static final float MAX_FLY_SPEED = 1.00F;
+    // Uses conservative byte costs so obviously-too-large rollback jobs fail before streaming starts.
+    private static final long ESTIMATED_ROLLBACK_BYTES_PER_PLACE_OP = 320L;
+    // AIR clears are compact now, but they still generate one rollback record per touched block.
+    private static final long ESTIMATED_ROLLBACK_BYTES_PER_CLEAR_OP = 96L;
+    // Adds headroom for metadata files and block-entity-heavy schematics.
+    private static final double ESTIMATED_ROLLBACK_SAFETY_MULTIPLIER = 1.25D;
     private static final Map<UUID, LoadedSchematicSession> LOADED_SCHEMATICS = new ConcurrentHashMap<>();
+    private static final Map<UUID, PendingUnsafePasteConfirmation> PENDING_UNSAFE_PASTES = new ConcurrentHashMap<>();
 
     public static void register(RegisterCommandsEvent event, SchematicLoader loader) {
         event.getDispatcher().register(
@@ -185,11 +194,26 @@ public class SchemCommand {
                                 true,
                                 false
                             )))))
+                .then(Commands.literal("confirm-unsafe")
+                    .then(Commands.argument("token", StringArgumentType.word())
+                        .executes(context -> executeConfirmUnsafePaste(
+                            context.getSource(),
+                            loader,
+                            StringArgumentType.getString(context, "token")
+                        ))))
                 .then(Commands.literal("status")
                     .executes(context -> executeStatus(context.getSource()))
                     .then(Commands.argument("jobId", StringArgumentType.word())
                         .suggests((context, builder) -> suggestJobIds(builder))
                         .executes(context -> executeStatusJob(
+                            context.getSource(),
+                            StringArgumentType.getString(context, "jobId")
+                        ))))
+                .then(Commands.literal("perf")
+                    .executes(context -> executePerf(context.getSource()))
+                    .then(Commands.argument("jobId", StringArgumentType.word())
+                        .suggests((context, builder) -> suggestJobIds(builder))
+                        .executes(context -> executePerfJob(
                             context.getSource(),
                             StringArgumentType.getString(context, "jobId")
                         ))))
@@ -380,55 +404,45 @@ public class SchemCommand {
         job.freezeGravity = freezeGravity;
         job.schematicPath = loaded.file;
         seedJobTotalsFromMetadata(job, loaded.metadata);
-        if (!RollbackStore.initializeStorage(job, server.getServerDirectory())) {
-            source.sendFailure(SchemMessages.error("Could not prepare rollback storage. ", job.failureReason != null ? job.failureReason : "Unknown error."));
+        RollbackBudgetEstimate rollbackEstimate = estimateRollbackBudget(server.getServerDirectory(), loaded.metadata, skipClear);
+        if (!rollbackEstimate.fitsPerJobLimit || !rollbackEstimate.fitsTotalLimit) {
+            queueUnsafePasteConfirmation(source, explicitPos, debugWarnings, skipClear, freezeGravity, rollbackEstimate);
             return 0;
         }
-        if (!JobManager.submit(job)) {
-            source.sendFailure(SchemMessages.error("Could not queue paste. ", "The max concurrent job limit has been reached."));
+        return startLoadedPaste(source, loader, loaded, origin, debugWarnings, skipClear, freezeGravity, false);
+    }
+
+    private static int executeConfirmUnsafePaste(CommandSourceStack source, SchematicLoader loader, String token) {
+        ServerPlayer player = source.getPlayer();
+        if (player == null) {
+            source.sendFailure(SchemMessages.error("Player only command. ", "Unsafe paste confirmation must be clicked in-game."));
             return 0;
         }
 
-        source.sendSuccess(() -> SchemMessages.info("Streaming " + loaded.name + "..."), false);
-        if (skipClear) {
-            source.sendSuccess(() -> SchemMessages.warning(
-                "Fast mode is faster, but not safe: old world blocks, air gaps, and unsupported/falling blocks may remain inside the pasted area."
-            ), false);
-        }
-        if (freezeGravity) {
-            source.sendSuccess(() -> SchemMessages.warning(
-                "Freeze-gravity mode adds hidden support under unsupported falling blocks to preserve the build shape."
-            ), false);
+        PendingUnsafePasteConfirmation pending = PENDING_UNSAFE_PASTES.get(player.getUUID());
+        if (pending == null || !pending.token.equalsIgnoreCase(token)) {
+            source.sendFailure(SchemMessages.error("Unsafe paste confirmation expired. ", "Run /schem paste again to create a new confirmation."));
+            return 0;
         }
 
-        loader.streamPasteIntoJobAsync(source.getLevel(), loaded.file, new SchematicReadOptions(true, true, true), job)
-            .thenAcceptAsync(summary -> {
-                source.sendSuccess(() -> SchemMessages.info(
-                    "Streamed " + loaded.name + " (" + job.displayTotalBlocks + " placeable blocks)."
-                ), false);
+        LoadedSchematicSession loaded = LOADED_SCHEMATICS.get(sessionKey(source));
+        if (loaded == null || !loaded.file.equals(pending.schematicFile)) {
+            PENDING_UNSAFE_PASTES.remove(player.getUUID());
+            source.sendFailure(SchemMessages.error("Loaded schematic changed. ", "Run /schem paste again to confirm against the current schematic."));
+            return 0;
+        }
 
-                if (debugWarnings && summary.skippedInvalidBlocks() > 0) {
-                    source.sendSuccess(() -> SchemMessages.warning(
-                        "Debug: skipped " + summary.skippedInvalidBlocks()
-                            + " block placements due to invalid palette states."
-                    ), false);
-                    int lines = Math.min(MAX_DEBUG_INVALID_STATES, summary.invalidPaletteStates().size());
-                    for (int index = 0; index < lines; index++) {
-                        String stateId = summary.invalidPaletteStates().get(index);
-                        source.sendSuccess(() -> SchemMessages.warning("Invalid state: " + stateId), false);
-                    }
-                }
-            }, server::execute)
-            .exceptionally(error -> {
-                server.execute(() -> {
-                    job.state = SchematicPasteJob.State.FAILED;
-                    job.failureReason = unwrap(error).getMessage();
-                    source.sendFailure(SchemMessages.error("Error streaming loaded schematic: ", unwrap(error).getMessage()));
-                });
-                return null;
-            });
-
-        return Command.SINGLE_SUCCESS;
+        PENDING_UNSAFE_PASTES.remove(player.getUUID());
+        return startLoadedPaste(
+            source,
+            loader,
+            loaded,
+            pending.origin,
+            pending.debugWarnings,
+            pending.skipClear,
+            pending.freezeGravity,
+            true
+        );
     }
 
     private static int executePlanLoaded(
@@ -632,6 +646,27 @@ public class SchemCommand {
             return 0;
         }
         sendVerboseStatus(source, job);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int executePerf(CommandSourceStack source) {
+        if (JobManager.all().isEmpty()) {
+            source.sendSuccess(() -> SchemMessages.info("No active schematic jobs."), false);
+            return Command.SINGLE_SUCCESS;
+        }
+        for (SchematicPasteJob job : JobManager.all()) {
+            sendCompactPerf(source, job);
+        }
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int executePerfJob(CommandSourceStack source, String jobToken) {
+        SchematicPasteJob job = findJobByToken(jobToken);
+        if (job == null) {
+            source.sendFailure(SchemMessages.error("Job not found: ", jobToken));
+            return 0;
+        }
+        sendDetailedPerf(source, job);
         return Command.SINGLE_SUCCESS;
     }
 
@@ -873,6 +908,72 @@ public class SchemCommand {
         }
     }
 
+    private static void sendCompactPerf(CommandSourceStack source, SchematicPasteJob job) {
+        long totalTrackedNanos = job.perfPlacementNanos
+            + job.perfSnapshotNanos
+            + job.perfBlockEntityNanos
+            + job.perfConnectionFinalizeNanos
+            + job.perfEntitySpawnNanos;
+        source.sendSuccess(() -> SchemMessages.prefix()
+            .append(Component.literal(shortJobId(job) + "  ").withStyle(ChatFormatting.AQUA))
+            .append(Component.literal(job.schematicName + "  ").withStyle(ChatFormatting.WHITE))
+            .append(Component.literal("ops ").withStyle(ChatFormatting.GRAY))
+            .append(Component.literal(Integer.toString(job.perfPlacementOps)).withStyle(ChatFormatting.WHITE))
+            .append(Component.literal("  place avg ").withStyle(ChatFormatting.GRAY))
+            .append(Component.literal(formatMicros(avgNanos(job.perfPlacementNanos, job.perfPlacementOps))).withStyle(ChatFormatting.WHITE))
+            .append(Component.literal("  snapshot avg ").withStyle(ChatFormatting.GRAY))
+            .append(Component.literal(formatMicros(avgNanos(job.perfSnapshotNanos, job.perfSnapshotOps))).withStyle(ChatFormatting.WHITE))
+            .append(Component.literal("  tracked ").withStyle(ChatFormatting.GRAY))
+            .append(Component.literal(formatMillis(totalTrackedNanos)).withStyle(ChatFormatting.WHITE)),
+            false);
+    }
+
+    private static void sendDetailedPerf(CommandSourceStack source, SchematicPasteJob job) {
+        long totalTrackedNanos = job.perfPlacementNanos
+            + job.perfSnapshotNanos
+            + job.perfBlockEntityNanos
+            + job.perfConnectionFinalizeNanos
+            + job.perfEntitySpawnNanos;
+        long wallClockNanos = Math.max(1L, System.nanoTime() - job.startedAtNanos);
+        double trackedShare = Math.min(100.0D, totalTrackedNanos * 100.0D / wallClockNanos);
+        source.sendSuccess(() -> SchemMessages.prefix()
+            .append(Component.literal("Perf ").withStyle(ChatFormatting.GRAY))
+            .append(Component.literal(shortJobId(job) + "  ").withStyle(ChatFormatting.AQUA))
+            .append(Component.literal(job.schematicName).withStyle(ChatFormatting.WHITE)),
+            false);
+
+        source.sendSuccess(() -> SchemMessages.prefix()
+            .append(Component.literal("Tracked: ").withStyle(ChatFormatting.GRAY))
+            .append(Component.literal(formatMillis(totalTrackedNanos) + "  ").withStyle(ChatFormatting.WHITE))
+            .append(Component.literal("Wall: ").withStyle(ChatFormatting.GRAY))
+            .append(Component.literal(formatMillis(wallClockNanos) + "  ").withStyle(ChatFormatting.WHITE))
+            .append(Component.literal("Tracked share: ").withStyle(ChatFormatting.GRAY))
+            .append(Component.literal(String.format(Locale.ROOT, "%.1f%%", trackedShare)).withStyle(ChatFormatting.WHITE)),
+            false);
+
+        source.sendSuccess(() -> perfLine("Placement", job.perfPlacementOps, job.perfPlacementNanos), false);
+        source.sendSuccess(() -> perfLine("Snapshots", job.perfSnapshotOps, job.perfSnapshotNanos), false);
+        source.sendSuccess(() -> perfLine("Block entities", job.perfBlockEntityOps, job.perfBlockEntityNanos), false);
+        source.sendSuccess(() -> perfLine("Finalize", job.perfConnectionFinalizeOps, job.perfConnectionFinalizeNanos), false);
+        source.sendSuccess(() -> perfLine("Entity spawn", job.perfEntitySpawnOps, job.perfEntitySpawnNanos), false);
+
+        source.sendSuccess(() -> SchemMessages.prefix()
+            .append(Component.literal("Signals: ").withStyle(ChatFormatting.GRAY))
+            .append(Component.literal(job.perfChunkLoadPauses + " chunk pauses  ").withStyle(ChatFormatting.WHITE))
+            .append(Component.literal(job.perfBudgetStops + " budget stops").withStyle(ChatFormatting.WHITE)),
+            false);
+    }
+
+    private static Component perfLine(String label, int ops, long nanos) {
+        return SchemMessages.prefix()
+            .append(Component.literal(label + ": ").withStyle(ChatFormatting.GRAY))
+            .append(Component.literal(Integer.toString(ops) + " ops  ").withStyle(ChatFormatting.WHITE))
+            .append(Component.literal("total ").withStyle(ChatFormatting.GRAY))
+            .append(Component.literal(formatMillis(nanos) + "  ").withStyle(ChatFormatting.WHITE))
+            .append(Component.literal("avg ").withStyle(ChatFormatting.GRAY))
+            .append(Component.literal(formatMicros(avgNanos(nanos, ops))).withStyle(ChatFormatting.WHITE));
+    }
+
     private static ChatFormatting stateColor(SchematicPasteJob.State state) {
         return switch (state) {
             case RUNNING -> ChatFormatting.GREEN;
@@ -905,6 +1006,97 @@ public class SchemCommand {
         return skipClear ? "fast" : "exact";
     }
 
+    private static int startLoadedPaste(
+        CommandSourceStack source,
+        SchematicLoader loader,
+        LoadedSchematicSession loaded,
+        BlockPos origin,
+        boolean debugWarnings,
+        boolean skipClear,
+        boolean freezeGravity,
+        boolean disableRollbackSnapshots
+    ) {
+        ServerPlayer player = source.getPlayer();
+        MinecraftServer server = source.getServer();
+        SchematicPasteJob job = new SchematicPasteJob(loaded.name, source.getLevel(), origin, player != null ? player.getUUID() : null);
+        job.skipClear = skipClear;
+        job.freezeGravity = freezeGravity;
+        job.disableRollbackSnapshots = disableRollbackSnapshots;
+        job.schematicPath = loaded.file;
+        seedJobTotalsFromMetadata(job, loaded.metadata);
+
+        if (!disableRollbackSnapshots) {
+            if (!RollbackStore.initializeStorage(job, server.getServerDirectory())) {
+                source.sendFailure(SchemMessages.error("Could not prepare rollback storage. ", job.failureReason != null ? job.failureReason : "Unknown error."));
+                return 0;
+            }
+        }
+        if (!JobManager.submit(job)) {
+            source.sendFailure(SchemMessages.error("Could not queue paste. ", "The max concurrent job limit has been reached."));
+            return 0;
+        }
+
+        source.sendSuccess(() -> SchemMessages.info("Streaming " + loaded.name + "..."), false);
+        if (disableRollbackSnapshots) {
+            source.sendSuccess(() -> SchemMessages.warning(
+                "Unsafe paste confirmed: rollback snapshots are disabled for this job, so cancel cannot restore changed blocks."
+            ), false);
+        }
+        if (skipClear) {
+            source.sendSuccess(() -> SchemMessages.warning(
+                "Fast mode is faster, but not safe: old world blocks, air gaps, and unsupported/falling blocks may remain inside the pasted area."
+            ), false);
+        }
+        if (freezeGravity) {
+            source.sendSuccess(() -> SchemMessages.warning(
+                "Freeze-gravity mode adds hidden support under unsupported falling blocks to preserve the build shape."
+            ), false);
+        }
+
+        loader.streamPasteIntoJobAsync(source.getLevel(), loaded.file, new SchematicReadOptions(true, true, true), job)
+            .thenAcceptAsync(summary -> {
+                source.sendSuccess(() -> SchemMessages.info(
+                    "Streamed " + loaded.name + " (" + job.displayTotalBlocks + " placeable blocks)."
+                ), false);
+
+                if (debugWarnings && summary.skippedInvalidBlocks() > 0) {
+                    source.sendSuccess(() -> SchemMessages.warning(
+                        "Debug: skipped " + summary.skippedInvalidBlocks()
+                            + " block placements due to invalid palette states."
+                    ), false);
+                    int lines = Math.min(MAX_DEBUG_INVALID_STATES, summary.invalidPaletteStates().size());
+                    for (int index = 0; index < lines; index++) {
+                        String stateId = summary.invalidPaletteStates().get(index);
+                        source.sendSuccess(() -> SchemMessages.warning("Invalid state: " + stateId), false);
+                    }
+                }
+            }, server::execute)
+            .exceptionally(error -> {
+                server.execute(() -> {
+                    job.state = SchematicPasteJob.State.FAILED;
+                    job.failureReason = unwrap(error).getMessage();
+                    source.sendFailure(SchemMessages.error("Error streaming loaded schematic: ", unwrap(error).getMessage()));
+                });
+                return null;
+            });
+
+        return Command.SINGLE_SUCCESS;
+    }
+
+    // Formats rollback budgets the same way regardless of whether they come from config or estimates.
+    private static String formatStorageBytes(long bytes) {
+        if (bytes < 1024L) {
+            return bytes + " B";
+        }
+        if (bytes < 1024L * 1024L) {
+            return String.format(Locale.ROOT, "%.1f KB", bytes / 1024.0D);
+        }
+        if (bytes < 1024L * 1024L * 1024L) {
+            return String.format(Locale.ROOT, "%.1f MB", bytes / (1024.0D * 1024.0D));
+        }
+        return String.format(Locale.ROOT, "%.2f GB", bytes / (1024.0D * 1024.0D * 1024.0D));
+    }
+
     private static String formatFileSize(long bytes) {
         if (bytes < 1024) {
             return bytes + " B";
@@ -933,6 +1125,18 @@ public class SchemCommand {
             return String.format(Locale.ROOT, "%d:%02d:%02d", hours, minutes, seconds);
         }
         return String.format(Locale.ROOT, "%02d:%02d", minutes, seconds);
+    }
+
+    private static long avgNanos(long totalNanos, int ops) {
+        return ops > 0 ? totalNanos / ops : 0L;
+    }
+
+    private static String formatMillis(long nanos) {
+        return String.format(Locale.ROOT, "%.2f ms", nanos / 1_000_000.0D);
+    }
+
+    private static String formatMicros(long nanos) {
+        return String.format(Locale.ROOT, "%.2f us", nanos / 1_000.0D);
     }
 
     @Nullable
@@ -1042,6 +1246,108 @@ public class SchemCommand {
         }
     }
 
+    // Rejects jobs that cannot fit inside the configured rollback storage limits before any streaming begins.
+    private static RollbackBudgetEstimate estimateRollbackBudget(Path serverRoot, SchematicMetadata metadata, boolean skipClear) {
+        long clearOps = skipClear ? 0L : metadata.volume();
+        long placeOps = Math.max(0L, metadata.nonAirBlocks);
+        long estimatedBytes = estimateRollbackBytes(clearOps, placeOps, metadata.blockEntityCount);
+        long currentTotalBytes = RollbackStore.totalRollbackBytes(serverRoot);
+        long perJobLimitBytes = FrameShiftConfig.maxRollbackSnapshotBytesPerJob.get();
+        long totalLimitBytes = FrameShiftConfig.maxTotalRollbackStorageBytes.get();
+        long remainingTotalBytes = Math.max(0L, totalLimitBytes - currentTotalBytes);
+        return new RollbackBudgetEstimate(
+            estimatedBytes,
+            currentTotalBytes,
+            perJobLimitBytes,
+            totalLimitBytes,
+            remainingTotalBytes,
+            estimatedBytes <= perJobLimitBytes,
+            currentTotalBytes + estimatedBytes <= totalLimitBytes
+        );
+    }
+
+    // Uses metadata-only heuristics so paste preflight stays cheap and deterministic.
+    private static long estimateRollbackBytes(long clearOps, long placeOps, int blockEntityCount) {
+        double operationBytes = clearOps * (double) ESTIMATED_ROLLBACK_BYTES_PER_CLEAR_OP
+            + placeOps * (double) ESTIMATED_ROLLBACK_BYTES_PER_PLACE_OP;
+        double blockEntityOverhead = Math.max(0, blockEntityCount) * 512.0D;
+        return (long) Math.ceil((operationBytes + blockEntityOverhead) * ESTIMATED_ROLLBACK_SAFETY_MULTIPLIER);
+    }
+
+    // Explains whether the limiting factor is this job alone or the accumulated persisted rollback data on disk.
+    private static void sendRollbackBudgetFailure(CommandSourceStack source, RollbackBudgetEstimate estimate) {
+        source.sendFailure(SchemMessages.error(
+            "Paste would likely exceed rollback storage budget. ",
+            "Estimated " + formatStorageBytes(estimate.estimatedBytes) + "."
+        ));
+        source.sendFailure(SchemMessages.field(
+            "Rollback budget",
+            "per-job " + formatStorageBytes(estimate.perJobLimitBytes)
+                + "  total free " + formatStorageBytes(estimate.remainingTotalBytes)
+                + "  used " + formatStorageBytes(estimate.currentTotalBytes),
+            ChatFormatting.WHITE
+        ));
+
+        if (!estimate.fitsPerJobLimit) {
+            source.sendFailure(SchemMessages.warning(
+                "This schematic likely needs a higher maxRollbackSnapshotBytesPerJob value."
+            ));
+        }
+        if (!estimate.fitsTotalLimit) {
+            source.sendFailure(SchemMessages.warning(
+                "Current persisted rollback data is already using too much space. Run /schem cleanup apply or raise maxTotalRollbackStorageBytes."
+            ));
+        }
+    }
+
+    // Requires an explicit chat click before running a paste that will intentionally skip rollback snapshots.
+    private static void queueUnsafePasteConfirmation(
+        CommandSourceStack source,
+        @Nullable BlockPos explicitPos,
+        boolean debugWarnings,
+        boolean skipClear,
+        boolean freezeGravity,
+        RollbackBudgetEstimate estimate
+    ) {
+        sendRollbackBudgetFailure(source, estimate);
+
+        ServerPlayer player = source.getPlayer();
+        if (player == null) {
+            source.sendFailure(SchemMessages.warning(
+                "Console cannot use click-to-confirm unsafe paste. Raise rollback limits or use an in-game player to confirm."
+            ));
+            return;
+        }
+
+        BlockPos origin = explicitPos != null ? explicitPos : player.blockPosition();
+        String token = UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
+        LoadedSchematicSession loaded = LOADED_SCHEMATICS.get(sessionKey(source));
+        if (loaded == null) {
+            source.sendFailure(SchemMessages.error("No schematic is loaded. ", "Run /schem load <name> first."));
+            return;
+        }
+
+        PENDING_UNSAFE_PASTES.put(player.getUUID(), new PendingUnsafePasteConfirmation(
+            token,
+            loaded.file,
+            origin,
+            debugWarnings,
+            skipClear,
+            freezeGravity
+        ));
+
+        Component confirm = SchemMessages.prefix()
+            .append(Component.literal("Rollback snapshots will be disabled for this paste. ").withStyle(ChatFormatting.YELLOW))
+            .append(Component.literal("[Confirm unsafe paste]").withStyle(style -> style
+                .withColor(ChatFormatting.RED)
+                .withBold(true)
+                .withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/schem confirm-unsafe " + token))
+                .withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT, Component.literal(
+                    "Run this paste without rollback snapshots. Cancel will not restore changed blocks."
+                )))));
+        source.sendFailure(confirm);
+    }
+
     private static PlanPreview buildPlanPreview(SchematicMetadata metadata, BlockPos origin, boolean skipClear) {
         BlockPos min = origin.offset(metadata.offsetX, metadata.offsetY, metadata.offsetZ);
         BlockPos max = min.offset(metadata.sizeX - 1, metadata.sizeY - 1, metadata.sizeZ - 1);
@@ -1083,6 +1389,27 @@ public class SchemCommand {
     }
 
     private record LoadedSchematicSession(String name, Path file, SchematicMetadata metadata) {
+    }
+
+    private record PendingUnsafePasteConfirmation(
+        String token,
+        Path schematicFile,
+        BlockPos origin,
+        boolean debugWarnings,
+        boolean skipClear,
+        boolean freezeGravity
+    ) {
+    }
+
+    private record RollbackBudgetEstimate(
+        long estimatedBytes,
+        long currentTotalBytes,
+        long perJobLimitBytes,
+        long totalLimitBytes,
+        long remainingTotalBytes,
+        boolean fitsPerJobLimit,
+        boolean fitsTotalLimit
+    ) {
     }
 
     private record PlanPreview(

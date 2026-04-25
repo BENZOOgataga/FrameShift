@@ -634,34 +634,53 @@ public final class SchematicLoader {
     }
 
     private static Tag sanitizeSignLine(@Nullable Tag line) {
-        if (line instanceof StringTag || line instanceof CompoundTag || line instanceof ListTag) {
-            return line.copy();
+        if (line instanceof StringTag stringTag) {
+            return stringTag.copy();
+        }
+        // Modern sign text expects each line to be stored as a JSON string component, not a nested NBT object/list.
+        if (line instanceof CompoundTag || line instanceof ListTag) {
+            return StringTag.valueOf(line.toString());
         }
         return StringTag.valueOf("");
     }
 
     private static void enqueueClearVolume(SchematicPasteJob job, SchematicMetadata metadata) throws InterruptedException {
-        // Clear each vertical column from top to bottom so falling blocks are removed before their support disappears.
-        for (int y = metadata.sizeY - 1; y >= 0; y--) {
-            for (int z = 0; z < metadata.sizeZ; z++) {
-                for (int x = 0; x < metadata.sizeX; x++) {
-                    if (job.state == SchematicPasteJob.State.CANCELLED
-                        || job.state == SchematicPasteJob.State.FAILED
-                        || job.rollbackMode) {
-                        return;
-                    }
+        // Clear top-down, but group work by chunk at each Y level to reduce repeated chunk switches.
+        int minX = metadata.offsetX;
+        int maxX = metadata.offsetX + metadata.sizeX - 1;
+        int minZ = metadata.offsetZ;
+        int maxZ = metadata.offsetZ + metadata.sizeZ - 1;
+        int minChunkX = Math.floorDiv(minX, 16);
+        int maxChunkX = Math.floorDiv(maxX, 16);
+        int minChunkZ = Math.floorDiv(minZ, 16);
+        int maxChunkZ = Math.floorDiv(maxZ, 16);
 
-                    BlockPos worldPos = job.origin.offset(
-                        metadata.offsetX + x,
-                        metadata.offsetY + y,
-                        metadata.offsetZ + z
-                    );
-                    job.enqueuePlacement(new SchematicPasteJob.PlacementTask(
-                        worldPos,
-                        Blocks.AIR.defaultBlockState(),
-                        null,
-                        0
-                    ));
+        for (int y = metadata.sizeY - 1; y >= 0; y--) {
+            int relativeY = metadata.offsetY + y;
+            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
+                int chunkMinZ = Math.max(minZ, chunkZ << 4);
+                int chunkMaxZ = Math.min(maxZ, (chunkZ << 4) + 15);
+                for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
+                    int chunkMinX = Math.max(minX, chunkX << 4);
+                    int chunkMaxX = Math.min(maxX, (chunkX << 4) + 15);
+
+                    for (int z = chunkMinZ; z <= chunkMaxZ; z++) {
+                        for (int x = chunkMinX; x <= chunkMaxX; x++) {
+                            if (job.state == SchematicPasteJob.State.CANCELLED
+                                || job.state == SchematicPasteJob.State.FAILED
+                                || job.rollbackMode) {
+                                return;
+                            }
+
+                            BlockPos worldPos = job.origin.offset(x, relativeY, z);
+                            job.enqueuePlacement(new SchematicPasteJob.PlacementTask(
+                                worldPos,
+                                Blocks.AIR.defaultBlockState(),
+                                null,
+                                0
+                            ));
+                        }
+                    }
                 }
             }
         }

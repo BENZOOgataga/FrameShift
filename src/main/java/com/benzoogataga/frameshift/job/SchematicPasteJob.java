@@ -83,6 +83,18 @@ public class SchematicPasteJob {
     public int rollbackApplied;
     public int rollbackSkippedConflicts;
     public int rollbackFailed;
+    public long perfPlacementNanos;
+    public long perfSnapshotNanos;
+    public long perfBlockEntityNanos;
+    public long perfConnectionFinalizeNanos;
+    public long perfEntitySpawnNanos;
+    public int perfPlacementOps;
+    public int perfSnapshotOps;
+    public int perfBlockEntityOps;
+    public int perfConnectionFinalizeOps;
+    public int perfEntitySpawnOps;
+    public int perfChunkLoadPauses;
+    public int perfBudgetStops;
     public final long startedAtNanos;
     public long clearPhaseStartedAtNanos;
     public long placePhaseStartedAtNanos;
@@ -90,6 +102,8 @@ public class SchematicPasteJob {
     public boolean placePhaseObserved;
     public boolean skipClear;
     public boolean freezeGravity;
+    // Disables rollback snapshots for jobs the player explicitly forced past the storage warning.
+    public boolean disableRollbackSnapshots;
     public long rollbackSequence;
 
     public SchematicPasteJob(String schematicName, ServerLevel level, BlockPos origin, @Nullable UUID executorUuid) {
