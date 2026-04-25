@@ -577,9 +577,7 @@ public final class SchematicLoader {
         ListTag messages = sanitizeSignLines(rawList(textTag, "messages"), front, source, false);
         sanitized.put("messages", messages);
         ListTag filtered = sanitizeOptionalSignLines(rawList(textTag, "filtered_messages"), messages);
-        if (!filtered.isEmpty()) {
-            sanitized.put("filtered_messages", filtered);
-        }
+        sanitized.put("filtered_messages", filtered);
 
         String color = textTag.contains("color", Tag.TAG_STRING) ? textTag.getString("color") : source.getString("Color");
         sanitized.putString("color", color.isBlank() ? "black" : color.toLowerCase(Locale.ROOT));

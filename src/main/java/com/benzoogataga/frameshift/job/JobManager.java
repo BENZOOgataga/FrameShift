@@ -49,6 +49,7 @@ public class JobManager {
         if (job != null && (job.state == SchematicPasteJob.State.RUNNING || job.state == SchematicPasteJob.State.ROLLING_BACK)) {
             job.state = SchematicPasteJob.State.PAUSED;
             job.autoPaused = false;
+            job.autoPauseReason = SchematicPasteJob.AutoPauseReason.NONE;
         }
     }
 
@@ -57,6 +58,7 @@ public class JobManager {
         if (job != null && job.state == SchematicPasteJob.State.PAUSED) {
             job.state = job.rollbackMode ? SchematicPasteJob.State.ROLLING_BACK : SchematicPasteJob.State.RUNNING;
             job.autoPaused = false;
+            job.autoPauseReason = SchematicPasteJob.AutoPauseReason.NONE;
         }
     }
 

@@ -58,9 +58,8 @@ public class TickHandler {
         MinecraftServer server = event.getServer();
 
         for (SchematicPasteJob job : JobManager.all()) {
-            if (job.state == SchematicPasteJob.State.PAUSED && job.autoPaused && mspt <= 45.0D) {
-                job.state = job.rollbackMode ? SchematicPasteJob.State.ROLLING_BACK : SchematicPasteJob.State.RUNNING;
-                job.autoPaused = false;
+            if (job.state == SchematicPasteJob.State.PAUSED && job.autoPaused && shouldAutoResume(job, mspt)) {
+                resumeAutoPausedJob(job);
             }
 
             if (job.state != SchematicPasteJob.State.RUNNING && job.state != SchematicPasteJob.State.ROLLING_BACK) {
@@ -69,8 +68,7 @@ public class TickHandler {
 
             double throttle = FrameShiftConfig.throttleFactor(mspt);
             if (throttle <= 0.0D) {
-                job.state = SchematicPasteJob.State.PAUSED;
-                job.autoPaused = true;
+                pauseForThrottle(job);
                 continue;
             }
 
@@ -119,8 +117,7 @@ public class TickHandler {
                         // chunk is now loaded, continue this tick
                     } else {
                         job.blockEntityQueue.addFirst(task);
-                        job.state = SchematicPasteJob.State.PAUSED;
-                        job.autoPaused = true;
+                        pauseForChunkWait(job);
                         job.perfChunkLoadPauses++;
                         break;
                     }
@@ -202,6 +199,32 @@ public class TickHandler {
         return elapsedMillis < FrameShiftConfig.maxMillisPerTick.get();
     }
 
+    private static boolean shouldAutoResume(SchematicPasteJob job, double mspt) {
+        return switch (job.autoPauseReason) {
+            case THROTTLE -> mspt <= 45.0D;
+            case CHUNK_WAIT -> true;
+            case NONE -> false;
+        };
+    }
+
+    private static void resumeAutoPausedJob(SchematicPasteJob job) {
+        job.state = job.rollbackMode ? SchematicPasteJob.State.ROLLING_BACK : SchematicPasteJob.State.RUNNING;
+        job.autoPaused = false;
+        job.autoPauseReason = SchematicPasteJob.AutoPauseReason.NONE;
+    }
+
+    private static void pauseForThrottle(SchematicPasteJob job) {
+        job.state = SchematicPasteJob.State.PAUSED;
+        job.autoPaused = true;
+        job.autoPauseReason = SchematicPasteJob.AutoPauseReason.THROTTLE;
+    }
+
+    private static void pauseForChunkWait(SchematicPasteJob job) {
+        job.state = SchematicPasteJob.State.PAUSED;
+        job.autoPaused = true;
+        job.autoPauseReason = SchematicPasteJob.AutoPauseReason.CHUNK_WAIT;
+    }
+
     private static boolean placeNext(SchematicPasteJob job) {
         SchematicPasteJob.PlacementTask task = job.peekNormalPlacement();
         if (task == null) {
@@ -212,8 +235,7 @@ public class TickHandler {
             if (FrameShiftConfig.preloadChunks.get() && ChunkHelper.ensureLoaded(job.level, task.worldPos)) {
                 // chunk is now loaded, continue placement
             } else {
-                job.state = SchematicPasteJob.State.PAUSED;
-                job.autoPaused = true;
+                pauseForChunkWait(job);
                 job.perfChunkLoadPauses++;
                 return false;
             }
@@ -356,8 +378,7 @@ public class TickHandler {
                 // chunk is now loaded, continue this tick
             } else {
                 job.connectionFinalizeQueue.addFirst(task);
-                job.state = SchematicPasteJob.State.PAUSED;
-                job.autoPaused = true;
+                pauseForChunkWait(job);
                 job.perfChunkLoadPauses++;
                 return false;
             }
@@ -403,8 +424,7 @@ public class TickHandler {
                 // chunk is now loaded, continue this tick
             } else {
                 job.entityQueue.addFirst(task);
-                job.state = SchematicPasteJob.State.PAUSED;
-                job.autoPaused = true;
+                pauseForChunkWait(job);
                 job.perfChunkLoadPauses++;
                 return false;
             }
@@ -441,8 +461,7 @@ public class TickHandler {
                     // chunk is now loaded, continue rollback
                 } else {
                     job.rollbackQueue.addFirst(task);
-                    job.state = SchematicPasteJob.State.PAUSED;
-                    job.autoPaused = true;
+                    pauseForChunkWait(job);
                     job.perfChunkLoadPauses++;
                     break;
                 }

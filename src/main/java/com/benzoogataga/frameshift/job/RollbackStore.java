@@ -22,6 +22,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -202,12 +203,53 @@ public final class RollbackStore {
     // Rebuilds the in-memory rollback queue in reverse touch order for execution.
     public static void rebuildRollbackQueue(SchematicPasteJob job) {
         job.rollbackQueue.clear();
-        List<SchematicPasteJob.RollbackTask> ordered = new ArrayList<>(job.rollbackIndex.values());
-        ordered.sort(Comparator.comparingLong((SchematicPasteJob.RollbackTask task) -> task.lastTouchedSequence).reversed());
-        for (SchematicPasteJob.RollbackTask task : ordered) {
-            job.rollbackQueue.addLast(task);
+        List<SchematicPasteJob.RollbackTask> ordered = orderRollbackTasks(job.rollbackIndex.values());
+        int index = 0;
+        while (index < ordered.size()) {
+            int layerY = ordered.get(index).worldPos.getY();
+            List<SchematicPasteJob.RollbackTask> fluidFirst = new ArrayList<>();
+            List<SchematicPasteJob.RollbackTask> remaining = new ArrayList<>();
+
+            while (index < ordered.size() && ordered.get(index).worldPos.getY() == layerY) {
+                SchematicPasteJob.RollbackTask task = ordered.get(index++);
+                if (rollbackFluidPriority(task) > 0) {
+                    fluidFirst.add(task);
+                } else {
+                    remaining.add(task);
+                }
+            }
+
+            for (SchematicPasteJob.RollbackTask task : fluidFirst) {
+                job.rollbackQueue.addLast(task);
+            }
+            for (SchematicPasteJob.RollbackTask task : remaining) {
+                job.rollbackQueue.addLast(task);
+            }
         }
-        job.rollbackQueued = ordered.size();
+        job.rollbackQueued = job.rollbackQueue.size();
+    }
+
+    // Builds deterministic rollback order: top-down by Y, then reverse touch order inside a layer.
+    static List<SchematicPasteJob.RollbackTask> orderRollbackTasks(Collection<SchematicPasteJob.RollbackTask> tasks) {
+        List<SchematicPasteJob.RollbackTask> ordered = new ArrayList<>(tasks);
+        ordered.sort(Comparator
+            // Keep rollback top-down so unsupported blocks do not drop before their layer is restored.
+            .comparingInt((SchematicPasteJob.RollbackTask task) -> task.worldPos.getY()).reversed()
+            // Preserve prior rollback behavior inside each priority bucket.
+            .thenComparing(Comparator.comparingLong((SchematicPasteJob.RollbackTask task) -> task.lastTouchedSequence).reversed()));
+        return ordered;
+    }
+
+    private static int rollbackFluidPriority(SchematicPasteJob.RollbackTask task) {
+        boolean expectedHasFluid = !task.expectedState.getFluidState().isEmpty();
+        boolean originalHasFluid = !task.originalState.getFluidState().isEmpty();
+        if (expectedHasFluid && !originalHasFluid) {
+            return 2;
+        }
+        if (expectedHasFluid) {
+            return 1;
+        }
+        return 0;
     }
 
     // Returns a normalized block entity tag with position/id for comparisons and restore.

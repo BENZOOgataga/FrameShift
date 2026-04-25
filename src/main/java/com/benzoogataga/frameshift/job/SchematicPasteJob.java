@@ -31,6 +31,12 @@ public class SchematicPasteJob {
         FAILED
     }
 
+    public enum AutoPauseReason {
+        NONE,
+        THROTTLE,
+        CHUNK_WAIT
+    }
+
     public final UUID jobId;
     public final String schematicName;
     public final ServerLevel level;
@@ -40,6 +46,7 @@ public class SchematicPasteJob {
 
     public volatile State state = State.RUNNING;
     public volatile boolean autoPaused;
+    public volatile AutoPauseReason autoPauseReason = AutoPauseReason.NONE;
     @Nullable
     public volatile String failureReason;
 
