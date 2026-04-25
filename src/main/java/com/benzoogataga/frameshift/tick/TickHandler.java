@@ -21,6 +21,7 @@ import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.CrossCollisionBlock;
+import net.minecraft.world.level.block.Fallable;
 import net.minecraft.world.level.block.FallingBlock;
 import net.minecraft.world.level.block.WallBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -247,7 +248,7 @@ public class TickHandler {
     }
 
     private static boolean shouldFreezeGravity(SchematicPasteJob job, ServerLevel level, SchematicPasteJob.PlacementTask task) {
-        if (!job.freezeGravity || !(task.state.getBlock() instanceof FallingBlock)) {
+        if (!job.freezeGravity || !(task.state.getBlock() instanceof Fallable)) {
             return false;
         }
         if (task.worldPos.getY() <= level.getMinBuildHeight()) {
