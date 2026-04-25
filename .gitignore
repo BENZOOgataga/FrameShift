@@ -32,6 +32,9 @@ bin/
 # IDE - VS Code
 .vscode/
 
+# Local Claude/Codex machine settings
+.claude/settings.local.json
+
 # OS
 .DS_Store
 Thumbs.db
