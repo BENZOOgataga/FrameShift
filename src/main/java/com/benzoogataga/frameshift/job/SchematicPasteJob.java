@@ -11,12 +11,15 @@ import org.jetbrains.annotations.Nullable;
 
 import java.nio.file.Path;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.PriorityBlockingQueue;
+import java.util.concurrent.Semaphore;
 
 // Represents one paste operation from submission through completion and verification.
 public class SchematicPasteJob {
@@ -51,10 +54,17 @@ public class SchematicPasteJob {
     @Nullable public volatile Path persistenceDirectory;
     // Append-only rollback event log path used to reconstruct rollback state on restart.
     @Nullable public volatile Path rollbackLogPath;
+    // Buffered rollback log lines waiting to be flushed to disk in one append.
+    public final List<String> pendingRollbackLogEntries = new ArrayList<>();
+    public int pendingRollbackLogBytes;
+    public long rollbackLogBytesOnDisk;
+    public final int queuedPlacementCapacity;
+    private final Semaphore queuedPlacementPermits;
 
     public final LinkedBlockingQueue<PlacementTask> placementQueue;
     public final PriorityBlockingQueue<PlacementTask> gravityPlacementQueue;
     public final ArrayDeque<PlacementTask> blockEntityQueue = new ArrayDeque<>();
+    public final ArrayDeque<PlacementTask> connectionFinalizeQueue = new ArrayDeque<>();
     public final ArrayDeque<RollbackTask> rollbackQueue = new ArrayDeque<>();
     public final Map<Long, RollbackTask> rollbackIndex = new HashMap<>();
 
@@ -93,9 +103,11 @@ public class SchematicPasteJob {
         this.level = level;
         this.origin = origin;
         this.executorUuid = executorUuid;
-        this.placementQueue = new LinkedBlockingQueue<>(FrameShiftConfig.maxQueuedPlacements.get());
+        this.queuedPlacementCapacity = FrameShiftConfig.maxQueuedPlacements.get();
+        this.queuedPlacementPermits = new Semaphore(queuedPlacementCapacity, true);
+        this.placementQueue = new LinkedBlockingQueue<>(queuedPlacementCapacity);
         this.gravityPlacementQueue = new PriorityBlockingQueue<>(
-            FrameShiftConfig.maxQueuedPlacements.get(),
+            queuedPlacementCapacity,
             Comparator
                 .comparingInt((PlacementTask task) -> task.worldPos.getY())
                 .thenComparingInt(task -> task.worldPos.getX())
@@ -107,6 +119,12 @@ public class SchematicPasteJob {
 
     // Attaches prepared placements without bulk queue construction to avoid main-thread stalls.
     public void loadPreparedPaste(PreparedSchematicPaste prepared) {
+        if (prepared.blocks.size() > queuedPlacementCapacity) {
+            throw new IllegalStateException(
+                "Prepared paste contains " + prepared.blocks.size()
+                    + " blocks but maxQueuedPlacements is " + queuedPlacementCapacity
+            );
+        }
         this.loadingComplete = false;
         this.totalBlocks = prepared.blocks.size();
         this.expectedTotalBlocks = prepared.blocks.size();
@@ -115,11 +133,13 @@ public class SchematicPasteJob {
         this.clearPhaseStartedAtNanos = startedAtNanos;
         this.placePhaseStartedAtNanos = startedAtNanos;
         this.placePhaseObserved = true;
-        this.placementQueue.clear();
-        this.gravityPlacementQueue.clear();
+        clearQueuedPlacements();
         this.blockEntityQueue.clear();
         for (PreparedBlockPlacement block : prepared.blocks) {
             BlockPos worldPos = origin.offset(block.relativePos);
+            if (!reservePlacementCapacity()) {
+                throw new IllegalStateException("Failed to reserve placement capacity for prepared paste");
+            }
             placementQueue.offer(new PlacementTask(worldPos, block.state, block.blockEntityTag == null ? null : block.blockEntityTag.copy(), 0));
         }
         this.loadingComplete = true;
@@ -127,11 +147,13 @@ public class SchematicPasteJob {
 
     // Enqueues one parsed placement and blocks the producer when memory buffer is full.
     public void enqueuePlacement(PlacementTask task) throws InterruptedException {
+        queuedPlacementPermits.acquire();
         placementQueue.put(task);
         totalBlocks++;
     }
 
     public void enqueueGravityPlacement(PlacementTask task) throws InterruptedException {
+        queuedPlacementPermits.acquire();
         gravityPlacementQueue.put(task);
         totalBlocks++;
     }
@@ -146,7 +168,7 @@ public class SchematicPasteJob {
         if (rollbackMode) {
             return rollbackQueue.size();
         }
-        return placementQueue.size() + gravityPlacementQueue.size() + blockEntityQueue.size();
+        return placementQueue.size() + gravityPlacementQueue.size() + blockEntityQueue.size() + connectionFinalizeQueue.size();
     }
 
     public void observeProgress(long nowNanos) {
@@ -162,10 +184,10 @@ public class SchematicPasteJob {
             if (remaining <= 0) {
                 return 0L;
             }
-            if (configuredBlocksPerSecond <= 0.0D) {
-                return -1L;
+            if (configuredBlocksPerSecond > 0.0D) {
+                return (long) Math.ceil(remaining / configuredBlocksPerSecond);
             }
-            return (long) Math.ceil(remaining / configuredBlocksPerSecond);
+            return -1L;
         }
 
         int clearRemaining = Math.max(0, clearOperationsTotal - clearCompletedOperations());
@@ -174,19 +196,20 @@ public class SchematicPasteJob {
             return 0L;
         }
 
-        double clearRate = configuredBlocksPerSecond;
         int clearDone = clearCompletedOperations();
         long clearElapsedNanos = Math.max(1L, nowNanos - clearPhaseStartedAtNanos);
-        if (clearDone >= 10_000) {
-            clearRate = stabilizeRate(clearDone * 1_000_000_000.0D / clearElapsedNanos, configuredBlocksPerSecond);
-        }
+        double observedClearRate = clearDone >= 10_000
+            ? clearDone * 1_000_000_000.0D / clearElapsedNanos
+            : -1.0D;
 
-        double placeRate = configuredBlocksPerSecond;
         int placeDone = displayCompletedBlocks();
         long placeElapsedNanos = Math.max(1L, nowNanos - placePhaseStartedAtNanos);
-        if (placeDone >= 1_000 && placePhaseObserved) {
-            placeRate = stabilizeRate(placeDone * 1_000_000_000.0D / placeElapsedNanos, configuredBlocksPerSecond);
-        }
+        double observedPlaceRate = placeDone >= 1_000 && placePhaseObserved
+            ? placeDone * 1_000_000_000.0D / placeElapsedNanos
+            : -1.0D;
+
+        double clearRate = chooseRate(configuredBlocksPerSecond, observedClearRate);
+        double placeRate = chooseRate(configuredBlocksPerSecond, observedPlaceRate);
 
         if (clearRate <= 0.0D || placeRate <= 0.0D) {
             return -1L;
@@ -232,10 +255,38 @@ public class SchematicPasteJob {
     }
 
     public void clearForwardQueues() {
-        placementQueue.clear();
-        gravityPlacementQueue.clear();
+        clearQueuedPlacements();
         blockEntityQueue.clear();
+        connectionFinalizeQueue.clear();
         loadingComplete = true;
+    }
+
+    @Nullable
+    public PlacementTask peekNormalPlacement() {
+        return placementQueue.peek();
+    }
+
+    @Nullable
+    public PlacementTask peekGravityPlacement() {
+        return gravityPlacementQueue.peek();
+    }
+
+    @Nullable
+    public PlacementTask pollNormalPlacement() {
+        PlacementTask task = placementQueue.poll();
+        if (task != null) {
+            queuedPlacementPermits.release();
+        }
+        return task;
+    }
+
+    @Nullable
+    public PlacementTask pollGravityPlacement() {
+        PlacementTask task = gravityPlacementQueue.poll();
+        if (task != null) {
+            queuedPlacementPermits.release();
+        }
+        return task;
     }
 
     public void beginRollback() {
@@ -252,6 +303,26 @@ public class SchematicPasteJob {
         double minRate = configuredRate * 0.5D;
         double maxRate = configuredRate * 1.1D;
         return Math.max(minRate, Math.min(maxRate, observedRate));
+    }
+
+    private static double chooseRate(double configuredRate, double observedRate) {
+        if (configuredRate > 0.0D) {
+            return observedRate > 0.0D ? stabilizeRate(observedRate, configuredRate) : configuredRate;
+        }
+        return observedRate;
+    }
+
+    private boolean reservePlacementCapacity() {
+        return queuedPlacementPermits.tryAcquire();
+    }
+
+    private void clearQueuedPlacements() {
+        int cleared = placementQueue.size() + gravityPlacementQueue.size();
+        placementQueue.clear();
+        gravityPlacementQueue.clear();
+        if (cleared > 0) {
+            queuedPlacementPermits.release(cleared);
+        }
     }
 
     // Tracks one placement and the retry budget used by verification.

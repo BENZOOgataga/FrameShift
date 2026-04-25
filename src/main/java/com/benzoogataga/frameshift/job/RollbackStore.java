@@ -31,6 +31,7 @@ public final class RollbackStore {
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
     private static final String SNAPSHOT = "snapshot";
     private static final String UPDATE = "update";
+    private static final int FLUSH_THRESHOLD_BYTES = 128 * 1024;
 
     private RollbackStore() {}
 
@@ -59,6 +60,7 @@ public final class RollbackStore {
             if (!Files.exists(job.rollbackLogPath)) {
                 Files.createFile(job.rollbackLogPath);
             }
+            job.rollbackLogBytesOnDisk = Files.size(job.rollbackLogPath);
             return true;
         } catch (IOException e) {
             job.state = SchematicPasteJob.State.FAILED;
@@ -100,9 +102,7 @@ public final class RollbackStore {
                     sequence
                 );
 
-                byte[] bytes = (GSON.toJson(LogEvent.snapshot(created)) + System.lineSeparator()).getBytes(StandardCharsets.UTF_8);
-                enforceStorageLimits(level.getServer().getServerDirectory(), bytes.length, job);
-                Files.write(job.rollbackLogPath, bytes, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+                queueLogEntry(level.getServer().getServerDirectory(), job, GSON.toJson(LogEvent.snapshot(created)));
 
                 job.rollbackIndex.put(key, created);
                 job.rollbackQueued = job.rollbackIndex.size();
@@ -113,8 +113,7 @@ public final class RollbackStore {
             existing.expectedBlockEntityTag = expectedBlockEntityTag == null ? null : expectedBlockEntityTag.copy();
             existing.hadExpectedBlockEntity = hadExpectedBlockEntity;
             existing.lastTouchedSequence = sequence;
-            byte[] bytes = (GSON.toJson(LogEvent.update(existing)) + System.lineSeparator()).getBytes(StandardCharsets.UTF_8);
-            Files.write(job.rollbackLogPath, bytes, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            queueLogEntry(level.getServer().getServerDirectory(), job, GSON.toJson(LogEvent.update(existing)));
             return true;
         } catch (IOException e) {
             job.state = SchematicPasteJob.State.FAILED;
@@ -130,6 +129,7 @@ public final class RollbackStore {
             return;
         }
 
+        job.rollbackLogBytesOnDisk = Files.size(job.rollbackLogPath);
         List<String> lines = Files.readAllLines(job.rollbackLogPath, StandardCharsets.UTF_8);
         for (String line : lines) {
             if (line.isBlank()) {
@@ -173,6 +173,19 @@ public final class RollbackStore {
         }
 
         job.rollbackQueued = job.rollbackIndex.size();
+    }
+
+    // Flushes buffered rollback log entries to disk in one append.
+    public static void flushPending(SchematicPasteJob job) throws IOException {
+        if (job.rollbackLogPath == null || job.pendingRollbackLogEntries.isEmpty()) {
+            return;
+        }
+        String payload = String.join(System.lineSeparator(), job.pendingRollbackLogEntries) + System.lineSeparator();
+        byte[] bytes = payload.getBytes(StandardCharsets.UTF_8);
+        Files.write(job.rollbackLogPath, bytes, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        job.rollbackLogBytesOnDisk += bytes.length;
+        job.pendingRollbackLogEntries.clear();
+        job.pendingRollbackLogBytes = 0;
     }
 
     // Rebuilds the in-memory rollback queue in reverse touch order for execution.
@@ -219,7 +232,7 @@ public final class RollbackStore {
     private static void enforceStorageLimits(Path serverRoot, int appendBytes, SchematicPasteJob job) throws IOException {
         long perJobLimit = FrameShiftConfig.maxRollbackSnapshotBytesPerJob.get();
         long totalLimit = FrameShiftConfig.maxTotalRollbackStorageBytes.get();
-        long currentJobBytes = job.rollbackLogPath != null && Files.exists(job.rollbackLogPath) ? Files.size(job.rollbackLogPath) : 0L;
+        long currentJobBytes = job.rollbackLogBytesOnDisk + job.pendingRollbackLogBytes;
         long totalBytes = directorySize(JobPersistence.jobsDir(serverRoot));
 
         if (currentJobBytes + appendBytes > perJobLimit) {
@@ -242,6 +255,16 @@ public final class RollbackStore {
                     return 0L;
                 }
             }).sum();
+        }
+    }
+
+    private static void queueLogEntry(Path serverRoot, SchematicPasteJob job, String jsonLine) throws IOException {
+        byte[] bytes = (jsonLine + System.lineSeparator()).getBytes(StandardCharsets.UTF_8);
+        enforceStorageLimits(serverRoot, bytes.length, job);
+        job.pendingRollbackLogEntries.add(jsonLine);
+        job.pendingRollbackLogBytes += bytes.length;
+        if (job.pendingRollbackLogBytes >= FLUSH_THRESHOLD_BYTES) {
+            flushPending(job);
         }
     }
 

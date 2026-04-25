@@ -9,6 +9,9 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.StringTag;
+import net.minecraft.nbt.Tag;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.FallingBlock;
 import net.minecraft.world.level.block.Blocks;
@@ -482,7 +485,100 @@ public final class SchematicLoader {
         normalized.remove("Pos");
         normalized.remove("Id");
         normalized.remove("Data");
+        return sanitizeBlockEntityTag(normalized);
+    }
+
+    private static CompoundTag sanitizeBlockEntityTag(CompoundTag normalized) {
+        String id = normalized.getString("id");
+        if (id.endsWith("sign")) {
+            sanitizeSignTag(normalized);
+        }
         return normalized;
+    }
+
+    private static void sanitizeSignTag(CompoundTag tag) {
+        CompoundTag frontText = sanitizeSignText(tag.getCompound("front_text"), true, tag);
+        CompoundTag backText = sanitizeSignText(tag.getCompound("back_text"), false, tag);
+        tag.put("front_text", frontText);
+        tag.put("back_text", backText);
+        tag.remove("Text1");
+        tag.remove("Text2");
+        tag.remove("Text3");
+        tag.remove("Text4");
+        tag.remove("FilteredText1");
+        tag.remove("FilteredText2");
+        tag.remove("FilteredText3");
+        tag.remove("FilteredText4");
+        tag.remove("Color");
+        tag.remove("GlowingText");
+    }
+
+    private static CompoundTag sanitizeSignText(CompoundTag textTag, boolean front, CompoundTag source) {
+        CompoundTag sanitized = new CompoundTag();
+        ListTag messages = sanitizeSignLines(rawList(textTag, "messages"), front, source, false);
+        sanitized.put("messages", messages);
+        ListTag filtered = sanitizeOptionalSignLines(rawList(textTag, "filtered_messages"), messages);
+        if (!filtered.isEmpty()) {
+            sanitized.put("filtered_messages", filtered);
+        }
+
+        String color = textTag.contains("color", Tag.TAG_STRING) ? textTag.getString("color") : source.getString("Color");
+        sanitized.putString("color", color.isBlank() ? "black" : color.toLowerCase(Locale.ROOT));
+        sanitized.putBoolean(
+            "has_glowing_text",
+            textTag.contains("has_glowing_text", Tag.TAG_BYTE) ? textTag.getBoolean("has_glowing_text") : source.getBoolean("GlowingText")
+        );
+        return sanitized;
+    }
+
+    private static ListTag rawList(CompoundTag tag, String key) {
+        Tag raw = tag.get(key);
+        return raw instanceof ListTag list ? list : new ListTag();
+    }
+
+    private static ListTag sanitizeSignLines(ListTag existing, boolean front, CompoundTag source, boolean filtered) {
+        ListTag sanitized = new ListTag();
+        for (int index = 0; index < 4; index++) {
+            Tag line = index < existing.size() ? existing.get(index) : legacySignLine(front, source, index, filtered);
+            sanitized.add(sanitizeSignLine(line));
+        }
+        return sanitized;
+    }
+
+    private static ListTag sanitizeOptionalSignLines(ListTag existing, ListTag fallback) {
+        if (existing.isEmpty()) {
+            return copyStringLikeList(fallback);
+        }
+        ListTag sanitized = new ListTag();
+        for (int index = 0; index < 4; index++) {
+            Tag line = index < existing.size() ? existing.get(index) : fallback.get(index);
+            sanitized.add(sanitizeSignLine(line));
+        }
+        return sanitized;
+    }
+
+    private static ListTag copyStringLikeList(ListTag source) {
+        ListTag copy = new ListTag();
+        for (int index = 0; index < 4; index++) {
+            copy.add(sanitizeSignLine(index < source.size() ? source.get(index) : null));
+        }
+        return copy;
+    }
+
+    @Nullable
+    private static Tag legacySignLine(boolean front, CompoundTag source, int index, boolean filtered) {
+        if (!front) {
+            return null;
+        }
+        String key = (filtered ? "FilteredText" : "Text") + (index + 1);
+        return source.contains(key, Tag.TAG_STRING) ? StringTag.valueOf(source.getString(key)) : null;
+    }
+
+    private static Tag sanitizeSignLine(@Nullable Tag line) {
+        if (line instanceof StringTag || line instanceof CompoundTag || line instanceof ListTag) {
+            return line.copy();
+        }
+        return StringTag.valueOf("");
     }
 
     private static void enqueueClearVolume(SchematicPasteJob job, SchematicMetadata metadata) throws InterruptedException {

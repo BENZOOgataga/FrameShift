@@ -17,8 +17,12 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.CrossCollisionBlock;
 import net.minecraft.world.level.block.FallingBlock;
+import net.minecraft.world.level.block.WallBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.material.FluidState;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 
@@ -74,20 +78,20 @@ public class TickHandler {
                 boolean didPlace;
                 if (job.isClearingPhase()) {
                     // Clear phase: drain only the placement queue (AIR blocks, top-down order).
-                    if (job.placementQueue.isEmpty()) break;
-                    didPlace = placeNext(job, job.placementQueue);
+                    if (job.peekNormalPlacement() == null) break;
+                    didPlace = placeNext(job, false);
                 } else {
                     // Placement phase: interleave both queues by Y so every block's support is
                     // already placed before it is placed. Non-gravity wins ties at the same Y,
                     // ensuring e.g. a torch is placed after the gravity block it attaches to.
-                    SchematicPasteJob.PlacementTask normalHead = job.placementQueue.peek();
-                    SchematicPasteJob.PlacementTask gravityHead = job.gravityPlacementQueue.peek();
+                    SchematicPasteJob.PlacementTask normalHead = job.peekNormalPlacement();
+                    SchematicPasteJob.PlacementTask gravityHead = job.peekGravityPlacement();
                     if (normalHead == null && gravityHead == null) break;
                     boolean pickNormal = gravityHead == null
                         || (normalHead != null && normalHead.worldPos.getY() <= gravityHead.worldPos.getY());
                     didPlace = pickNormal
-                        ? placeNext(job, job.placementQueue)
-                        : placeNext(job, job.gravityPlacementQueue);
+                        ? placeNext(job, false)
+                        : placeNext(job, true);
                 }
                 if (!didPlace) break;
                 processed++;
@@ -118,12 +122,22 @@ public class TickHandler {
                 blockEntitiesProcessed++;
             }
 
+            int finalizeBudget = Math.max(1, targetPlacements / 4);
+            int finalized = 0;
+            while (finalized < finalizeBudget && withinBudget(tickStartNanos)) {
+                if (!finalizeConnections(job)) {
+                    break;
+                }
+                finalized++;
+            }
+
             job.observeProgress(System.nanoTime());
 
             if (job.loadingComplete
                 && job.placementQueue.isEmpty()
                 && job.gravityPlacementQueue.isEmpty()
-                && job.blockEntityQueue.isEmpty()) {
+                && job.blockEntityQueue.isEmpty()
+                && job.connectionFinalizeQueue.isEmpty()) {
                 job.state = SchematicPasteJob.State.DONE;
                 FrameShift.LOGGER.info("Paste job {} finished for schematic {}", job.jobId, job.schematicName);
                 notifyComplete(server, job);
@@ -148,9 +162,9 @@ public class TickHandler {
 
     private static boolean placeNext(
         SchematicPasteJob job,
-        java.util.Queue<SchematicPasteJob.PlacementTask> queue
+        boolean gravityQueue
     ) {
-        SchematicPasteJob.PlacementTask task = queue.peek();
+        SchematicPasteJob.PlacementTask task = gravityQueue ? job.peekGravityPlacement() : job.peekNormalPlacement();
         if (task == null) {
             return false;
         }
@@ -165,7 +179,10 @@ public class TickHandler {
             }
         }
 
-        queue.poll();
+        task = gravityQueue ? job.pollGravityPlacement() : job.pollNormalPlacement();
+        if (task == null) {
+            return false;
+        }
         job.blocksAttempted++;
         PlacementResult placementResult = applyBlockState(job, task);
         if (placementResult == PlacementResult.FAILED) {
@@ -181,6 +198,9 @@ public class TickHandler {
         }
         if (!isClearTask && task.blockEntityTag != null) {
             job.blockEntityQueue.addLast(task);
+        }
+        if (!isClearTask && needsConnectionFinalize(task.state)) {
+            job.connectionFinalizeQueue.addLast(task);
         }
         job.blocksVerified++;
         return true;
@@ -200,6 +220,7 @@ public class TickHandler {
             return PlacementResult.FAILED;
         }
         boolean changed = level.setBlock(task.worldPos, task.state, flags);
+        scheduleFluidTickIfNeeded(level, task.worldPos, task.state);
         if (changed) {
             return PlacementResult.CHANGED;
         }
@@ -239,6 +260,50 @@ public class TickHandler {
             return true;
         }
         return false;
+    }
+
+    private static boolean finalizeConnections(SchematicPasteJob job) {
+        SchematicPasteJob.PlacementTask task = job.connectionFinalizeQueue.pollFirst();
+        if (task == null) {
+            return false;
+        }
+        if (!ChunkHelper.isLoaded(job.level, task.worldPos)) {
+            if (FrameShiftConfig.preloadChunks.get() && ChunkHelper.ensureLoaded(job.level, task.worldPos)) {
+                // chunk is now loaded, continue this tick
+            } else {
+                job.connectionFinalizeQueue.addFirst(task);
+                job.state = SchematicPasteJob.State.PAUSED;
+                job.autoPaused = true;
+                return false;
+            }
+        }
+
+        ServerLevel level = job.level;
+        BlockState currentState = level.getBlockState(task.worldPos);
+        if (!currentState.is(task.state.getBlock())) {
+            return true;
+        }
+
+        BlockState finalizedState = Block.updateFromNeighbourShapes(currentState, level, task.worldPos);
+        if (finalizedState.isAir()) {
+            finalizedState = currentState;
+        }
+        if (finalizedState.equals(currentState)) {
+            scheduleFluidTickIfNeeded(level, task.worldPos, currentState);
+            return true;
+        }
+
+        CompoundTag blockEntityTag = RollbackStore.captureBlockEntity(level, task.worldPos);
+        if (!RollbackStore.snapshotBeforeMutation(job, level, task.worldPos, finalizedState, blockEntityTag)) {
+            return false;
+        }
+        if (!level.setBlock(task.worldPos, finalizedState, placementFlags(finalizedState.isAir()))
+            && !level.getBlockState(task.worldPos).equals(finalizedState)) {
+            job.blocksFailed++;
+            return false;
+        }
+        scheduleFluidTickIfNeeded(level, task.worldPos, finalizedState);
+        return true;
     }
 
     private static void processRollback(SchematicPasteJob job, long tickStartNanos) {
@@ -311,9 +376,23 @@ public class TickHandler {
         return true;
     }
 
+    private static boolean needsConnectionFinalize(BlockState state) {
+        Block block = state.getBlock();
+        return block instanceof WallBlock || block instanceof CrossCollisionBlock;
+    }
+
+    private static void scheduleFluidTickIfNeeded(ServerLevel level, net.minecraft.core.BlockPos pos, BlockState state) {
+        FluidState fluidState = state.getFluidState();
+        if (!fluidState.isEmpty()) {
+            level.scheduleTick(pos, fluidState.getType(), fluidState.getType().getTickDelay(level));
+        }
+    }
+
     private static void sendHud(MinecraftServer server, SchematicPasteJob job) {
         if (job.executorUuid == null) return;
-        if (job.state != SchematicPasteJob.State.RUNNING && job.state != SchematicPasteJob.State.PAUSED) return;
+        if (job.state != SchematicPasteJob.State.RUNNING
+            && job.state != SchematicPasteJob.State.PAUSED
+            && job.state != SchematicPasteJob.State.ROLLING_BACK) return;
         ServerPlayer player = server.getPlayerList().getPlayer(job.executorUuid);
         if (player == null) return;
         player.displayClientMessage(buildHudComponent(job), true);

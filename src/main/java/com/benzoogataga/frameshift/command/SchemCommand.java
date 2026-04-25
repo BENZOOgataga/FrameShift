@@ -1,6 +1,7 @@
 package com.benzoogataga.frameshift.command;
 
 import com.benzoogataga.frameshift.FrameShift;
+import com.benzoogataga.frameshift.chunk.ChunkHelper;
 import com.benzoogataga.frameshift.config.FrameShiftConfig;
 import com.benzoogataga.frameshift.job.JobManager;
 import com.benzoogataga.frameshift.job.JobPersistence;
@@ -20,6 +21,7 @@ import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.SharedSuggestionProvider;
 import net.minecraft.commands.arguments.coordinates.BlockPosArgument;
+import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
@@ -78,6 +80,22 @@ public class SchemCommand {
                             loader,
                             StringArgumentType.getString(context, "name")
                         ))))
+                .then(Commands.literal("plan")
+                    .executes(context -> executePlanLoaded(context.getSource(), null, false))
+                    .then(Commands.literal("no-clear")
+                        .executes(context -> executePlanLoaded(context.getSource(), null, true)))
+                    .then(Commands.argument("pos", BlockPosArgument.blockPos())
+                        .executes(context -> executePlanLoaded(
+                            context.getSource(),
+                            BlockPosArgument.getLoadedBlockPos(context, "pos"),
+                            false
+                        ))
+                        .then(Commands.literal("no-clear")
+                            .executes(context -> executePlanLoaded(
+                                context.getSource(),
+                                BlockPosArgument.getLoadedBlockPos(context, "pos"),
+                                true
+                            )))))
                 .then(Commands.literal("paste")
                     .executes(context -> executePasteLoaded(context.getSource(), loader, null, false, false))
                     .then(Commands.literal("freeze-gravity")
@@ -352,6 +370,7 @@ public class SchemCommand {
         job.skipClear = skipClear;
         job.freezeGravity = freezeGravity;
         job.schematicPath = loaded.file;
+        seedJobTotalsFromMetadata(job, loaded.metadata);
         if (!RollbackStore.initializeStorage(job, server.getServerDirectory())) {
             source.sendFailure(SchemMessages.error("Could not prepare rollback storage. ", job.failureReason != null ? job.failureReason : "Unknown error."));
             return 0;
@@ -403,6 +422,28 @@ public class SchemCommand {
         return Command.SINGLE_SUCCESS;
     }
 
+    private static int executePlanLoaded(
+        CommandSourceStack source,
+        @Nullable BlockPos explicitPos,
+        boolean skipClear
+    ) {
+        LoadedSchematicSession loaded = LOADED_SCHEMATICS.get(sessionKey(source));
+        if (loaded == null) {
+            source.sendFailure(SchemMessages.error("No schematic is loaded. ", "Run /schem load <name> first."));
+            return 0;
+        }
+
+        ServerPlayer player = source.getPlayer();
+        if (explicitPos == null && player == null) {
+            source.sendFailure(SchemMessages.error("Missing plan position. ", "Console use requires explicit coordinates."));
+            return 0;
+        }
+
+        BlockPos origin = explicitPos != null ? explicitPos : player.blockPosition();
+        sendPlanResult(source, buildPlanPreview(loaded.metadata, origin, skipClear));
+        return Command.SINGLE_SUCCESS;
+    }
+
     private static void sendListResult(CommandSourceStack source, SchematicListResult result) {
         if (result.entries.isEmpty()) {
             Component message = (result.failed > 0 || result.skipped > 0)
@@ -449,6 +490,62 @@ public class SchemCommand {
         source.sendSuccess(() -> SchemMessages.mutedField("Data version", metadata.dataVersion, -1, ChatFormatting.WHITE), false);
         source.sendSuccess(() -> SchemMessages.mutedField("Block entities", metadata.blockEntityCount, -1, ChatFormatting.WHITE), false);
         source.sendSuccess(() -> SchemMessages.mutedField("Entities", metadata.entityCount, -1, ChatFormatting.WHITE), false);
+    }
+
+    private static void sendPlanResult(CommandSourceStack source, PlanPreview plan) {
+        source.sendSuccess(() -> SchemMessages.field("Plan", plan.metadata.name, ChatFormatting.AQUA), false);
+        source.sendSuccess(() -> SchemMessages.field(
+            "Origin",
+            plan.origin.getX() + ", " + plan.origin.getY() + ", " + plan.origin.getZ(),
+            ChatFormatting.WHITE
+        ), false);
+        source.sendSuccess(() -> SchemMessages.field(
+            "Bounds",
+            plan.min.getX() + ", " + plan.min.getY() + ", " + plan.min.getZ()
+                + " -> "
+                + plan.max.getX() + ", " + plan.max.getY() + ", " + plan.max.getZ(),
+            ChatFormatting.WHITE
+        ), false);
+        source.sendSuccess(() -> SchemMessages.field(
+            "Chunks",
+            plan.chunkSpanX + " x " + plan.chunkSpanZ + " (" + plan.chunkCount + " total)  radius " + plan.chunkRadius,
+            plan.exceedsChunkRadiusLimit ? ChatFormatting.YELLOW : ChatFormatting.WHITE
+        ), false);
+        source.sendSuccess(() -> SchemMessages.field(
+            "Paste mode",
+            plan.skipClear ? "no-clear" : "exact",
+            plan.skipClear ? ChatFormatting.YELLOW : ChatFormatting.WHITE
+        ), false);
+        source.sendSuccess(() -> SchemMessages.field("Volume", formatCountLong(plan.volume), ChatFormatting.WHITE), false);
+        source.sendSuccess(() -> SchemMessages.field(
+            "Place ops",
+            plan.placeOperations >= 0L ? formatCountLong(plan.placeOperations) : "unknown",
+            plan.placeOperations >= 0L ? ChatFormatting.WHITE : ChatFormatting.DARK_GRAY
+        ), false);
+        source.sendSuccess(() -> SchemMessages.field(
+            "Clear ops",
+            formatCountLong(plan.clearOperations),
+            plan.skipClear ? ChatFormatting.DARK_GRAY : ChatFormatting.WHITE
+        ), false);
+        source.sendSuccess(() -> SchemMessages.field("Estimated work", formatCountLong(plan.totalOperations), ChatFormatting.WHITE), false);
+        source.sendSuccess(() -> SchemMessages.field(
+            "ETA",
+            formatEta(plan.etaSecondsFullSpeed) + " at " + formatCountLong(plan.fullSpeedBlocksPerSecond) + "/s",
+            ChatFormatting.WHITE
+        ), false);
+
+        if (plan.metadata.blockEntityCount > 0 || plan.metadata.entityCount > 0) {
+            source.sendSuccess(() -> SchemMessages.field(
+                "Extra data",
+                plan.metadata.blockEntityCount + " block entities  " + plan.metadata.entityCount + " entities",
+                ChatFormatting.WHITE
+            ), false);
+        }
+        if (plan.exceedsChunkRadiusLimit) {
+            source.sendSuccess(() -> SchemMessages.warning(
+                "Plan exceeds configured chunkRadiusLimit of " + FrameShiftConfig.chunkRadiusLimit.get() + " chunks."
+            ), false);
+        }
     }
 
     private static int executeStatus(CommandSourceStack source) {
@@ -667,7 +764,8 @@ public class SchemCommand {
                     ? formatCount(job.rollbackQueue.size()) + " rollback entries"
                     : formatCount(job.placementQueue.size()) + " normal  "
                         + formatCount(job.gravityPlacementQueue.size()) + " gravity  "
-                        + job.blockEntityQueue.size() + " block entities"
+                        + job.blockEntityQueue.size() + " block entities  "
+                        + job.connectionFinalizeQueue.size() + " finalize"
             ).withStyle(ChatFormatting.WHITE)),
             false);
 
@@ -695,6 +793,13 @@ public class SchemCommand {
         if (count < 1_000) return String.valueOf(count);
         if (count < 1_000_000) return String.format(Locale.ROOT, "%.1fK", count / 1_000.0);
         return String.format(Locale.ROOT, "%.2fM", count / 1_000_000.0);
+    }
+
+    private static String formatCountLong(long count) {
+        if (count < 1_000L) return Long.toString(count);
+        if (count < 1_000_000L) return String.format(Locale.ROOT, "%.1fK", count / 1_000.0);
+        if (count < 1_000_000_000L) return String.format(Locale.ROOT, "%.2fM", count / 1_000_000.0);
+        return String.format(Locale.ROOT, "%.2fB", count / 1_000_000_000.0);
     }
 
     private static String formatFileSize(long bytes) {
@@ -784,6 +889,32 @@ public class SchemCommand {
         );
     }
 
+    // Reattaches a reconnecting player to any active jobs they started.
+    public static void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
+        if (!(event.getEntity() instanceof ServerPlayer player)) {
+            return;
+        }
+
+        for (SchematicPasteJob job : JobManager.all()) {
+            if (job.executorUuid == null || !job.executorUuid.equals(player.getUUID())) {
+                continue;
+            }
+            if (job.state != SchematicPasteJob.State.RUNNING
+                && job.state != SchematicPasteJob.State.PAUSED
+                && job.state != SchematicPasteJob.State.ROLLING_BACK) {
+                continue;
+            }
+
+            player.sendSystemMessage(SchemMessages.prefix()
+                .append(Component.literal("Reattached to job ").withStyle(ChatFormatting.GRAY))
+                .append(Component.literal(shortJobId(job)).withStyle(ChatFormatting.AQUA))
+                .append(Component.literal(" (" + job.schematicName + ") ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(job.rollbackMode ? "rollback" : (job.isClearingPhase() ? "clearing" : "placing"))
+                    .withStyle(ChatFormatting.YELLOW)));
+            player.sendSystemMessage(buildCompactStatusLine(job));
+        }
+    }
+
     // Clears the loaded schematic session when a player disconnects to avoid a memory leak.
     public static void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
@@ -796,6 +927,78 @@ public class SchemCommand {
         return player != null ? player.getUUID() : CONSOLE_SESSION_KEY;
     }
 
+    private static void seedJobTotalsFromMetadata(SchematicPasteJob job, SchematicMetadata metadata) {
+        long clearOps = job.skipClear ? 0L : metadata.volume();
+        job.clearOperationsTotal = (int) Math.min(clearOps, Integer.MAX_VALUE);
+        if (metadata.nonAirBlocks >= 0L) {
+            job.displayTotalBlocks = (int) Math.min(metadata.nonAirBlocks, Integer.MAX_VALUE);
+            job.expectedTotalBlocks = (int) Math.min(clearOps + metadata.nonAirBlocks, Integer.MAX_VALUE);
+        } else {
+            job.displayTotalBlocks = -1;
+            job.expectedTotalBlocks = -1;
+        }
+    }
+
+    private static PlanPreview buildPlanPreview(SchematicMetadata metadata, BlockPos origin, boolean skipClear) {
+        BlockPos min = origin.offset(metadata.offsetX, metadata.offsetY, metadata.offsetZ);
+        BlockPos max = min.offset(metadata.sizeX - 1, metadata.sizeY - 1, metadata.sizeZ - 1);
+        int minChunkX = ChunkHelper.chunkX(min);
+        int maxChunkX = ChunkHelper.chunkX(max);
+        int minChunkZ = ChunkHelper.chunkZ(min);
+        int maxChunkZ = ChunkHelper.chunkZ(max);
+        int chunkSpanX = maxChunkX - minChunkX + 1;
+        int chunkSpanZ = maxChunkZ - minChunkZ + 1;
+        int centerChunkX = ChunkHelper.chunkX(origin);
+        int centerChunkZ = ChunkHelper.chunkZ(origin);
+        int chunkRadius = Math.max(
+            Math.max(Math.abs(minChunkX - centerChunkX), Math.abs(maxChunkX - centerChunkX)),
+            Math.max(Math.abs(minChunkZ - centerChunkZ), Math.abs(maxChunkZ - centerChunkZ))
+        );
+        long clearOperations = skipClear ? 0L : metadata.volume();
+        long placeOperations = metadata.nonAirBlocks;
+        long totalOperations = clearOperations + Math.max(0L, placeOperations);
+        long fullSpeedBlocksPerSecond = (long) FrameShiftConfig.maxBlocksPerTick.get() * 20L;
+        long etaSeconds = fullSpeedBlocksPerSecond > 0L ? (long) Math.ceil(totalOperations / (double) fullSpeedBlocksPerSecond) : -1L;
+        return new PlanPreview(
+            metadata,
+            origin,
+            min,
+            max,
+            skipClear,
+            metadata.volume(),
+            placeOperations,
+            clearOperations,
+            totalOperations,
+            chunkSpanX,
+            chunkSpanZ,
+            (long) chunkSpanX * chunkSpanZ,
+            chunkRadius,
+            chunkRadius > FrameShiftConfig.chunkRadiusLimit.get(),
+            fullSpeedBlocksPerSecond,
+            etaSeconds
+        );
+    }
+
     private record LoadedSchematicSession(String name, Path file, SchematicMetadata metadata) {
+    }
+
+    private record PlanPreview(
+        SchematicMetadata metadata,
+        BlockPos origin,
+        BlockPos min,
+        BlockPos max,
+        boolean skipClear,
+        long volume,
+        long placeOperations,
+        long clearOperations,
+        long totalOperations,
+        int chunkSpanX,
+        int chunkSpanZ,
+        long chunkCount,
+        int chunkRadius,
+        boolean exceedsChunkRadiusLimit,
+        long fullSpeedBlocksPerSecond,
+        long etaSecondsFullSpeed
+    ) {
     }
 }

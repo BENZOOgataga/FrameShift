@@ -45,6 +45,7 @@ public class FrameShift {
         NeoForge.EVENT_BUS.addListener(this::onServerStarted);
         NeoForge.EVENT_BUS.addListener(this::onServerStopping);
         NeoForge.EVENT_BUS.addListener(this::onRegisterCommands);
+        NeoForge.EVENT_BUS.addListener(SchemCommand::onPlayerLoggedIn);
         NeoForge.EVENT_BUS.addListener(SchemCommand::onPlayerLoggedOut);
 
         LOGGER.info("FrameShift loaded: Yet Another Schematics Manager");

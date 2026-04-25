@@ -105,6 +105,7 @@ public final class JobPersistence {
             if (job.rollbackLogPath == null) {
                 job.rollbackLogPath = dir.resolve("rollback.log");
             }
+            RollbackStore.flushPending(job);
 
             JobJson json = new JobJson();
             json.jobId = job.jobId.toString();

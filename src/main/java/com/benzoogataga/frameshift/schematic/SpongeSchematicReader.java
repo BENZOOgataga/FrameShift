@@ -53,6 +53,7 @@ public class SpongeSchematicReader implements SchematicReader {
         }
 
         ParsedSchematic parsed = parseStructure(root, file, fileSize, true);
+        long nonAirBlocks = countNonAirBlocks(parsed.data, parsed.airPaletteIds, parsed.volume());
 
         return new SchematicMetadata(
             stemOf(file.getFileName().toString()),
@@ -66,7 +67,7 @@ public class SpongeSchematicReader implements SchematicReader {
             parsed.offsetZ,
             fileSize,
             parsed.dataVersion,
-            -1L,
+            nonAirBlocks,
             parsed.blockEntityCount,
             parsed.entityCount
         );
@@ -280,6 +281,19 @@ public class SpongeSchematicReader implements SchematicReader {
             byId.put(palette.getInt(key), key);
         }
         return byId;
+    }
+
+    private static long countNonAirBlocks(byte[] data, int[] airPaletteIds, long volume) throws IOException {
+        try (InputStream stream = new ByteArrayInputStream(data)) {
+            long nonAirBlocks = 0L;
+            for (long cursor = 0; cursor < volume; cursor++) {
+                int paletteId = SpongeBlockStream.readVarInt(stream);
+                if (!SpongeBlockStream.isAirPaletteId(paletteId, airPaletteIds)) {
+                    nonAirBlocks++;
+                }
+            }
+            return nonAirBlocks;
+        }
     }
 
     private static final class SpongeBlockStream implements BlockStream {
