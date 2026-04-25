@@ -9,6 +9,32 @@ This roadmap mixes requested features with adjacent work needed to make them saf
 - User-facing progress should be understandable: phase, real block counts, ETA, and failure reason.
 - Expensive automation should remain configurable so server owners can decide how aggressive FrameShift is allowed to be.
 
+---
+
+## Completed
+
+### Implemented Features
+- `/schem list` with cursor-based pagination
+- `/schem info <name>` - dimensions, offset, volume, file size, data version, block entity / entity counts
+- `/schem load <name>` - loads schematic into a per-player session for paste
+- `/schem paste` - streams schematic directly into a bounded job queue; supports `freeze-gravity`, `no-clear`, `debug` flags and an optional target position
+- `/schem status` - phase, percentage, queued block count, blocks placed / unchanged / failed, ETA
+- `/schem cancel <jobId>` - cancels a running or paused job (no rollback yet - see Near Term)
+- `/schem reload` - hot-reloads config
+- `/flyspeed [value]` and `/flyspeed reset` - admin fly-speed utility with clamped range
+
+### Infrastructure and Bug Fixes (April 2026)
+- **Block entity position overflow** - `packPosition` used 10-bit masking per axis, silently misrouting block entities for schematics wider than 1023 blocks. Fixed to 16-bit long keys covering the full unsigned-short range.
+- **Volume integer overflow** - `ParsedSchematic.volume()` returned `int`, overflowing for very large schematics. Changed to `long`; block stream cursor promoted to `long` to match.
+- **Y-interleaved placement** - the tick loop previously drained all non-gravity blocks before starting any gravity blocks, meaning a torch or other attachment placed at the same Y as a supporting sand block could be placed before its support. Now both queues are interleaved by Y level (non-gravity wins ties), so every block's support is guaranteed in place before it is placed.
+- **Loaded schematic session leak** - `LOADED_SCHEMATICS` sessions were never evicted. Cleared on `PlayerLoggedOutEvent`.
+- **Double file read** - `streamPasteIntoJobAsync` opened and streamed the full schematic twice (count pass then enqueue pass). Collapsed to a single pass; the HUD uses `metadata.nonAirBlocks` as an estimate during streaming.
+- **`suggestNames` O(n²) deduplication** - replaced `ArrayList.contains()` with a `LinkedHashSet` for O(1) per-entry dedup.
+- **Duplicate `throttleFactor`** - identical method existed in both `TickHandler` and `SchemCommand`. Extracted to `FrameShiftConfig.throttleFactor(mspt)`.
+- **Dead code** - `enqueueNormalPlacement()` was an unreachable duplicate of `enqueuePlacement()`. Removed.
+
+---
+
 ## Near Term
 
 ### Job Control
@@ -16,7 +42,7 @@ This roadmap mixes requested features with adjacent work needed to make them saf
 - `/schem cancel <jobId>` should restore the world to the state it had before the job started.
 - Any admin with permission should be able to cancel a job started by another admin.
 - `/schem status` should expose stable job IDs and enough metadata to target the correct job quickly.
-- Add `/schem pause <jobId>` and `/schem resume <jobId>` for explicit operator control.
+- ~~Add `/schem pause <jobId>` and `/schem resume <jobId>` for explicit operator control.~~ ✓ done
 - Add `/schem status <jobId>` for a focused view of one job.
 
 ### Safer Cancellation / Rollback
@@ -42,9 +68,9 @@ This roadmap mixes requested features with adjacent work needed to make them saf
 
 ### Flight Utility
 
-- Add `/flyspeed <value>` as an admin utility.
-- Clamp values to a safe configured range.
-- Add `/flyspeed reset`.
+- ~~Add `/flyspeed <value>` as an admin utility.~~ ✓ done
+- ~~Clamp values to a safe configured range.~~ ✓ done
+- ~~Add `/flyspeed reset`.~~ ✓ done
 - Consider a convenience preset system such as `slow`, `normal`, `fast`, `survey`.
 
 ## Reliability
@@ -185,10 +211,11 @@ This roadmap mixes requested features with adjacent work needed to make them saf
 
 ### Milestone 1: Admin Control
 
-- Stable job targeting by ID
-- cancel / pause / resume by job ID
-- better status output
-- `/flyspeed`
+- Stable job targeting by ID ✓ done
+- cancel by job ID ✓ done
+- pause / resume commands ✓ done
+- `/flyspeed` ✓ done
+- better status output ✓ done (compact all-jobs view + verbose single-job view with origin, phase, counts, ETA, queue sizes)
 
 ### Milestone 2: Reliable Recovery
 

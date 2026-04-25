@@ -50,10 +50,30 @@ This file tracks bugs, rough edges, and implementation risks that are currently 
 
 ## Command / UX Gaps
 
-### `/schem status` Is Not Yet A Full Job Management Surface
+### `/schem status` Does Not Show Anchor Bounds
 
-- Status shows active jobs, but there is no full cancel/pause/resume targeting flow exposed yet for arbitrary job IDs.
-- The roadmap assumes this will be added, but the command set is not complete today.
+- `/schem status <jobId>` now shows origin, phase, progress, ETA, queue sizes, and placed/unchanged/failed counts.
+- It does not yet show the world-space bounding box of the paste (the full min/max corner coordinates).
+- This would require tracking schematic dimensions alongside the origin in the job.
+
+### Entity Paste Is Not Implemented
+
+- `SchematicReadOptions.includeEntities` exists but is hardcoded to `false` in the paste command.
+- Entities present in schematic files are silently ignored.
+- Block entities (chests, signs, etc.) work correctly; only mob/item entities are missing.
+
+### Legacy `.schematic` Format Is Not Supported
+
+- Only Sponge v2 and v3 `.schem` files are supported.
+- The `LEGACY_SCHEMATIC` enum value exists as a placeholder but has no reader implementation.
+- Attempting to use a `.schematic` (MCEdit/Schematica format) file will result in "unsupported format".
+
+### Freeze-Gravity Barriers Are Permanent
+
+- When `freeze-gravity` is used, barrier blocks are placed below any falling block (sand, gravel, etc.) that has no schematic support beneath it.
+- These barriers are intentional and permanent - they hold floating structures in place.
+- A warning is shown in chat, but admins should be aware that pasting a large floating sand structure will leave barrier blocks throughout the world below it.
+- Barriers can be removed manually with WorldEdit or similar tools.
 
 ### `/schem info` Does Not Yet Show Full Planning Data
 
@@ -70,6 +90,19 @@ This file tracks bugs, rough edges, and implementation risks that are currently 
 - This makes it easier to start an unexpectedly expensive exact clear job by mistake.
 
 ## Reliability Risks In Current Implementation
+
+### Gravity Placement Queue Is Unbounded
+
+- `placementQueue` (normal blocks) is a bounded `LinkedBlockingQueue` that blocks the async producer thread when full, capping memory usage.
+- `gravityPlacementQueue` (falling blocks) is a `PriorityBlockingQueue` with no capacity limit - it grows unboundedly.
+- A schematic with a very large number of gravity blocks (e.g. a sand mountain) could consume significant heap before the tick thread drains it.
+- Mitigation: the existing `maxSchematicVolume` and `maxBlocksTotal` config limits reduce the practical worst case.
+
+### Console Operators Share One Loaded Schematic Session
+
+- All console-sourced commands share a single session key (`UUID(0, 0)`).
+- If multiple operators issue `/schem load` from the console at the same time, each load overwrites the previous one.
+- In practice this is rare, but on multi-operator servers where several admins run commands from console simultaneously, one operator's paste could use the wrong schematic.
 
 ### No Rollback Snapshot Storage
 
@@ -92,6 +125,19 @@ This file tracks bugs, rough edges, and implementation risks that are currently 
 - There is no hybrid mode yet that preserves correctness while reducing full-volume cost.
 
 ## Codebase Issues / Technical Debt
+
+### Config Hot-Reload Uses NeoForge Internal Reflection
+
+- `/schem reload` calls `ConfigTracker.loadConfig()` via reflection because NeoForge does not expose a public API for triggering a config reload from commands.
+- If NeoForge renames or removes this internal method in a future update, the reload command will throw an exception at runtime with no compile-time warning.
+- The method signature is verified at call time, so the failure mode is a runtime error rather than a silent wrong-behavior failure.
+
+### `placeableBlocks` Counter Is An `int`
+
+- In `streamPasteIntoJobAsync`, the counter for queued placements and the job's `displayTotalBlocks` / `clearOperationsTotal` fields are all `int`.
+- The default `maxSchematicVolume` of 50,000,000 is safely below `Integer.MAX_VALUE`.
+- If the config is raised to an extreme value (above ~2.1 billion), `Math.toIntExact` will throw `ArithmeticException` at paste time rather than silently overflowing.
+- This is only reachable by deliberately misconfiguring the server.
 
 ### Tick-Side Progress And ETA Logic Is Growing Complex
 
@@ -135,16 +181,21 @@ This file tracks bugs, rough edges, and implementation risks that are currently 
 - real cancel rollback
 - persisted job resume after restart
 - richer `/schem info` and planning before paste
-- command-level job targeting and control
+- `/schem status <jobId>` focused view
 
 ### Medium Priority
 
+- entity paste support
 - more stable and more explainable ETA
-- explicit paste modes
+- explicit paste modes (exact / fast / replace)
 - improved status clarity for large jobs
+- bound the gravity placement queue (or share the normal queue's capacity)
 
 ### Lower Priority
 
+- legacy `.schematic` format support
+- multi-console session isolation
 - extra admin utilities
 - reconnect-aware HUD quality improvements
 - cleanup of build/deprecation warnings
+- replace `reloadConfig` reflection with a public NeoForge API when one becomes available
