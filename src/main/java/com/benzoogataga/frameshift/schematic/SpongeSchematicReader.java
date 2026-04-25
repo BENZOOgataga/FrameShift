@@ -169,7 +169,7 @@ public class SpongeSchematicReader implements SchematicReader {
             ? blockContainer.getList("BlockEntities", Tag.TAG_COMPOUND)
             : schematic.getList("BlockEntities", Tag.TAG_COMPOUND);
         Map<Integer, String> paletteById = invertPalette(palette);
-        Map<Integer, CompoundTag> blockEntities = readBlockEntities(
+        Map<Long, CompoundTag> blockEntities = readBlockEntities(
             blockEntityList,
             includeBlockEntities
         );
@@ -229,32 +229,33 @@ public class SpongeSchematicReader implements SchematicReader {
         return new int[] { 0, 0, 0 };
     }
 
-    private static Map<Integer, CompoundTag> readBlockEntities(ListTag list, boolean includeBlockEntities) {
+    private static Map<Long, CompoundTag> readBlockEntities(ListTag list, boolean includeBlockEntities) {
         if (!includeBlockEntities) {
             return Map.of();
         }
 
-        Map<Integer, CompoundTag> byIndex = new HashMap<>();
+        Map<Long, CompoundTag> byIndex = new HashMap<>();
         for (Tag element : list) {
             if (!(element instanceof CompoundTag blockEntity)) {
                 continue;
             }
-            int index = relativeIndex(blockEntity);
+            long index = relativeIndex(blockEntity);
             byIndex.put(index, blockEntity.copy());
         }
         return byIndex;
     }
 
-    private static int relativeIndex(CompoundTag blockEntity) {
+    private static long relativeIndex(CompoundTag blockEntity) {
         int[] pos = blockEntity.getIntArray("Pos");
         if (pos.length == 3) {
             return packPosition(pos[0], pos[1], pos[2]);
         }
-        return Integer.MIN_VALUE;
+        return Long.MIN_VALUE;
     }
 
-    private static int packPosition(int x, int y, int z) {
-        return (x & 0x3FF) << 20 | (y & 0x3FF) << 10 | (z & 0x3FF);
+    // Packs x/y/z into a long using 16 bits per axis, supporting Sponge's full unsigned-short range (0-65534).
+    private static long packPosition(int x, int y, int z) {
+        return ((long) (x & 0xFFFF) << 32) | ((long) (y & 0xFFFF) << 16) | (z & 0xFFFFL);
     }
 
     private static int[] resolveAirPaletteIds(CompoundTag palette) {
@@ -285,7 +286,7 @@ public class SpongeSchematicReader implements SchematicReader {
         private final ParsedSchematic parsed;
         private final SchematicReadOptions options;
         private final InputStream data;
-        private int cursor;
+        private long cursor;
         @Nullable
         private SchematicBlockEntry nextEntry;
 
@@ -303,9 +304,10 @@ public class SpongeSchematicReader implements SchematicReader {
 
             while (cursor < parsed.volume()) {
                 int paletteId = readVarInt(data);
-                int localX = cursor % parsed.sizeX;
-                int localZ = (cursor / parsed.sizeX) % parsed.sizeZ;
-                int localY = cursor / (parsed.sizeX * parsed.sizeZ);
+                long plane = (long) parsed.sizeX * parsed.sizeZ;
+                int localX = (int) (cursor % parsed.sizeX);
+                int localZ = (int) ((cursor / parsed.sizeX) % parsed.sizeZ);
+                int localY = (int) (cursor / plane);
                 cursor++;
 
                 if (options.ignoreAir && isAirPaletteId(paletteId, parsed.airPaletteIds)) {
@@ -395,11 +397,11 @@ public class SpongeSchematicReader implements SchematicReader {
         int offsetZ,
         byte[] data,
         Map<Integer, String> paletteById,
-        Map<Integer, CompoundTag> blockEntities,
+        Map<Long, CompoundTag> blockEntities,
         int[] airPaletteIds
     ) {
-        private int volume() {
-            return sizeX * sizeY * sizeZ;
+        private long volume() {
+            return (long) sizeX * sizeY * sizeZ;
         }
     }
 }
