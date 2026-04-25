@@ -28,13 +28,14 @@ This roadmap mixes requested features with adjacent work needed to make them saf
 ### Infrastructure and Bug Fixes (April 2026)
 - **Block entity position overflow** - `packPosition` used 10-bit masking per axis, silently misrouting block entities for schematics wider than 1023 blocks. Fixed to 16-bit long keys covering the full unsigned-short range.
 - **Volume integer overflow** - `ParsedSchematic.volume()` returned `int`, overflowing for very large schematics. Changed to `long`; block stream cursor promoted to `long` to match.
-- **Y-interleaved placement** - the tick loop previously drained all non-gravity blocks before starting any gravity blocks, meaning a torch or other attachment placed at the same Y as a supporting sand block could be placed before its support. Now both queues are interleaved by Y level (non-gravity wins ties), so every block's support is guaranteed in place before it is placed.
+- **Y-ordered placement** - the schematic stream iterates Y as its outermost axis, so blocks are enqueued in bottom-up order. All blocks (including gravity-affected ones) share a single Y-ascending placement queue. When a gravity block is dequeued, everything below it is already placed, so no separate sorted gravity queue or runtime Y-comparison is needed. The `freeze-gravity` barrier check still works correctly because the world state at Y-1 already reflects what the schematic placed there.
+- **Gravity block detection** - freeze-gravity now checks `instanceof Fallable` instead of `instanceof FallingBlock`, correctly covering suspicious sand/gravel (`BrushableBlock`) and pointed dripstone (`PointedDripstoneBlock`), which implement `Fallable` directly without extending `FallingBlock`.
 - **Loaded schematic session leak** - `LOADED_SCHEMATICS` sessions were never evicted. Cleared on `PlayerLoggedOutEvent`.
 - **Double file read** - `streamPasteIntoJobAsync` opened and streamed the full schematic twice (count pass then enqueue pass). Collapsed to a single pass; the HUD uses `metadata.nonAirBlocks` as an estimate during streaming.
 - **`suggestNames` O(n²) deduplication** - replaced `ArrayList.contains()` with a `LinkedHashSet` for O(1) per-entry dedup.
 - **Duplicate `throttleFactor`** - identical method existed in both `TickHandler` and `SchemCommand`. Extracted to `FrameShiftConfig.throttleFactor(mspt)`.
 - **Dead code** - `enqueueNormalPlacement()` was an unreachable duplicate of `enqueuePlacement()`. Removed.
-- **Shared forward queue cap** - normal and gravity placements now share one bounded capacity budget, so gravity-heavy schematics cannot grow an unbounded queue in memory.
+- **Single bounded placement queue** - all blocks (normal and gravity-affected) share one bounded `LinkedBlockingQueue`, so the producer back-pressures uniformly and no block type can grow an unbounded queue in memory.
 - **Reconnect-aware HUD** - jobs continue independently of player presence and reattach compact HUD/status messaging when the starter reconnects.
 - **Persisted restart resume** - running, paused, and rollback jobs now persist to disk on graceful stop and resume on startup when enabled.
 - **Rollback persistence** - cancel rollback survives graceful restart and preserves later external edits by skipping conflicted positions.

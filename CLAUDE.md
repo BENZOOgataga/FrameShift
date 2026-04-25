@@ -58,19 +58,32 @@ These versions were arrived at after resolving real compatibility conflicts - do
 com.benzoogataga.frameshift/
 ├── FrameShift.java          @Mod entry point - wires event buses and config
 ├── command/
-│   └── SchemCommand.java    /schem command tree (TODO)
+│   ├── SchemCommand.java    /schem command tree (list, info, paste, plan, status, pause, resume, cancel, cleanup, reload)
+│   └── SchemMessages.java   shared message/component helpers
 ├── schematic/
-│   ├── SchematicData.java   parsed file holder (dimensions, blocks, BEs, entities)
-│   └── SchematicLoader.java async file parser - returns CompletableFuture<SchematicData> (TODO)
+│   ├── SchematicData.java        parsed file holder (dimensions, blocks, BEs, entities)
+│   ├── SchematicLoader.java      async file parser and streaming enqueuer
+│   ├── SpongeSchematicReader.java Sponge v2/v3 .schem reader (primary format)
+│   ├── SchematicReader.java      reader interface
+│   ├── SchematicBlockEntry.java  one block from the stream (coords + state id + BE tag)
+│   ├── SchematicMetadata.java    lightweight file-level metadata (dimensions, counts, etc.)
+│   ├── SchematicReadOptions.java flags passed to readers (ignore-air, include-entities, etc.)
+│   ├── SchematicFormat.java      enum for supported formats (SPONGE_V2, SPONGE_V3)
+│   ├── SchematicListResult.java  paginated list result with cursor
+│   ├── BlockStream.java          iterator interface for streaming block entries
+│   ├── PreparedBlockPlacement.java one resolved placement (world pos + BlockState + BE tag)
+│   └── PreparedSchematicPaste.java full pre-resolved paste (list of placements + metadata)
 ├── job/
-│   ├── SchematicPasteJob.java  job model: state enum + 3 ArrayDeque queues
-│   └── JobManager.java         static registry, enforces maxConcurrentJobs
+│   ├── SchematicPasteJob.java  job model: state enum, one bounded placement queue, BE/entity/rollback queues
+│   ├── JobManager.java         static registry, enforces maxConcurrentJobs
+│   ├── JobPersistence.java     serialise/deserialise jobs to disk for restart resume
+│   └── RollbackStore.java      snapshot-before-mutation helpers and rollback event log
 ├── tick/
-│   └── TickHandler.java     @SubscribeEvent ServerTickEvent.Post - drains queues (TODO)
+│   └── TickHandler.java     @SubscribeEvent ServerTickEvent.Post - drains all queues each tick
 ├── config/
 │   └── FrameShiftConfig.java   all ModConfigSpec entries, registered SERVER type
 └── chunk/
-    └── ChunkHelper.java     isLoaded / preloadChunks / releaseChunks utilities (TODO)
+    └── ChunkHelper.java     isLoaded / ensureLoaded chunk utilities
 ```
 
 ## Architecture
@@ -81,10 +94,10 @@ com.benzoogataga.frameshift/
 
 ### Job Lifecycle
 1. Command submits job → `JobManager.submit()` checks concurrent limit
-2. `SchematicLoader.loadAsync()` parses file off-thread
-3. On completion, job transitions `LOADING → RUNNING`, queues populated
-4. Each tick: `TickHandler` drains queues up to configured limits
-5. Job transitions to `DONE` or `PAUSED`/`CANCELLED` on control commands
+2. `SchematicLoader.streamPasteIntoJobAsync()` parses and streams blocks off-thread into the bounded placement queue in Y-ascending order (schematic format guarantees this; the stream iterates Y as the outermost axis)
+3. Each tick: `TickHandler` drains queues up to configured limits — clear phase first (top-down AIR), then place phase (bottom-up from the Y-ordered queue), then block entities, then connection finalize, then entities
+4. Job transitions to `DONE`, or `PAUSED`/`CANCELLED` on control commands
+5. On cancel: `RollbackStore` replays snapshots in reverse sequence to restore the world; rollback runs as a throttled job, not a synchronous revert
 
 ### Adaptive Throttling (MSPT-based)
 | MSPT | Throughput |
@@ -130,4 +143,4 @@ schematics/
 On chunk unload, lag spike, or manual cancel: pause the job and preserve its state for resumption. Do not discard partial progress.
 
 ## Out of Scope (MVP)
-- GUI, undo/rollback, cross-dimension pasting, client-side rendering, instant paste
+- GUI, cross-dimension pasting, client-side rendering, instant paste, entity rollback

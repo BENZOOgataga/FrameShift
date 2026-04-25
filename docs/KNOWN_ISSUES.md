@@ -69,9 +69,10 @@ This file tracks bugs, rough edges, and implementation risks that are currently 
 
 ### Freeze-Gravity Barriers Are Permanent
 
-- When `freeze-gravity` is used, barrier blocks are placed below any falling block (sand, gravel, etc.) that has no schematic support beneath it.
+- When `freeze-gravity` is used, barrier blocks are placed below any gravity-affected block that has no schematic support beneath it.
+- This covers all blocks that implement Minecraft's `Fallable` interface: sand, red sand, gravel, concrete powder (all 16 colours), anvils, suspicious sand, suspicious gravel, pointed dripstone (stalactites), and any modded blocks that correctly implement `Fallable`.
 - These barriers are intentional and permanent - they hold floating structures in place.
-- A warning is shown in chat, but admins should be aware that pasting a large floating sand structure will leave barrier blocks throughout the world below it.
+- A warning is shown in chat, but admins should be aware that pasting a large floating structure will leave barrier blocks throughout the world below it.
 - Barriers can be removed manually with WorldEdit or similar tools.
 
 ### `/schem info` Still Does Not Show Anchor-Aware Planning Data
