@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -228,7 +229,7 @@ class SpongeSchematicReaderTest {
         }
 
         blocks.put("Palette", palette());
-        blocks.putByteArray("Data", encodeVarInts(List.of(0)));
+        blocks.putByteArray("Data", encodeVarInts(Collections.nCopies(width * height * length, 0)));
         blocks.put("BlockEntities", blockEntityList);
         schematic.putInt("Version", 3);
         schematic.putInt("DataVersion", dataVersion);
