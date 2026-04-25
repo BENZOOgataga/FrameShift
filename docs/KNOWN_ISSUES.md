@@ -21,11 +21,11 @@ This file tracks bugs, rough edges, and implementation risks that are currently 
   - block entity heavy sections
 - On huge jobs, ETA can still drift as server conditions change.
 
-### Cancel Does Not Restore Pre-Job World State
+### Rollback Does Not Undo Spawned Entities
 
-- There is currently no real undo/rollback system.
-- Cancelling or failing a job does not restore blocks that were already cleared or placed.
-- This is one of the highest priority missing safety features.
+- Block and block-entity rollback is implemented.
+- But schematic entities spawned during the final entity phase are not yet included in rollback.
+- Cancelling after entities have spawned will not despawn them automatically.
 
 ### Status Can Still Be Confusing On Very Large Jobs
 
@@ -36,48 +36,74 @@ This file tracks bugs, rough edges, and implementation risks that are currently 
   - queued tasks
   - total backend ops
 
-### Jobs Do Not Persist Across Server Restart Yet
+### Restart Resume Is Graceful-Stop Focused
 
-- Jobs are runtime-only.
-- A server restart currently loses active in-memory job state.
-- This means long-running clear/place jobs are not yet crash-safe or restart-safe.
+- Jobs now persist across graceful shutdown and resume on startup.
+- A hard crash or kill can still lose recent in-memory progress that was never flushed to disk.
+- Resume reliability is much better than before, but not fully crash-proof yet.
 
-### Jobs Continue Independently Of Player Presence, But HUD Does Not Reattach
+### Reconnect HUD / ETA Still Needs Polish
 
-- The job itself does not depend on the player continuing to stand still.
-- However, reconnect behavior for the starter’s HUD/session experience is not designed yet.
-- There is no robust reconnect-aware job UX at the moment.
+- The HUD now reattaches when the starter reconnects.
+- ETA and progress are much better than before, but the display still needs more refinement on huge jobs and chunk-wait-heavy runs.
 
 ## Command / UX Gaps
 
-### `/schem status` Is Not Yet A Full Job Management Surface
+### `/schem status` Does Not Show Anchor Bounds
 
-- Status shows active jobs, but there is no full cancel/pause/resume targeting flow exposed yet for arbitrary job IDs.
-- The roadmap assumes this will be added, but the command set is not complete today.
+- `/schem status <jobId>` now shows origin, phase, progress, ETA, queue sizes, and placed/unchanged/failed counts.
+- It does not yet show the world-space bounding box of the paste (the full min/max corner coordinates).
+- This would require tracking schematic dimensions alongside the origin in the job.
 
-### `/schem info` Does Not Yet Show Full Planning Data
+### Entity Paste Needs Wider Validation
 
-- Offset is shown now.
-- But `/schem info` still does not yet provide all the planning fields users would expect for large jobs, such as:
-  - non-air block count
-  - estimated clear operations at a target anchor
-  - estimated runtime by mode
-  - world-space bounds preview for a target position
+- Entity pasting is implemented for Sponge `.schem` files and resumes after graceful restart.
+- It still needs more production validation across mobs, item frames, paintings, boats, minecarts, and passenger stacks.
+- Entity rollback is not implemented.
 
-### No Dry-Run / Plan Command
+### Legacy `.schematic` Format Is Not Supported
 
-- There is no command yet to validate a paste plan without starting the job.
-- This makes it easier to start an unexpectedly expensive exact clear job by mistake.
+- Only Sponge v2 and v3 `.schem` files are supported.
+- The `LEGACY_SCHEMATIC` enum value exists as a placeholder but has no reader implementation.
+- Attempting to use a `.schematic` (MCEdit/Schematica format) file will result in "unsupported format".
+
+### Freeze-Gravity Barriers Are Permanent
+
+- When `freeze-gravity` is used, barrier blocks are placed below any falling block (sand, gravel, etc.) that has no schematic support beneath it.
+- These barriers are intentional and permanent - they hold floating structures in place.
+- A warning is shown in chat, but admins should be aware that pasting a large floating sand structure will leave barrier blocks throughout the world below it.
+- Barriers can be removed manually with WorldEdit or similar tools.
+
+### `/schem info` Still Does Not Show Anchor-Aware Planning Data
+
+- `/schem info` is now file-metadata focused.
+- Anchor-aware bounds, clear/place counts, and ETA are handled by `/schem plan`.
+- If desired later, `/schem info` could link more explicitly to that workflow.
+
+### `/schem plan` Does Not Yet Check Protected/Unsafe Targets
+
+- Dry-run planning now exists.
+- It does not yet warn about protected regions, sensitive overlap, or custom server safety rules.
 
 ## Reliability Risks In Current Implementation
 
-### No Rollback Snapshot Storage
+### Chunk Radius Limit Is Still Informational
 
-- The code does not record original world state before clearing/placing.
-- Because of that:
-  - cancel cannot truly undo
-  - crash recovery cannot reconstruct pre-job state
-  - failed jobs can leave the world partially modified
+- `/schem plan` now reports chunk span/radius and warns when the preview exceeds `chunkRadiusLimit`.
+- But the runtime path still does not hard-enforce that limit before paste start.
+- That means the config is not yet a true safety guard.
+
+### Console Operators Share One Loaded Schematic Session
+
+- All console-sourced commands share a single session key (`UUID(0, 0)`).
+- If multiple operators issue `/schem load` from the console at the same time, each load overwrites the previous one.
+- In practice this is rare, but on multi-operator servers where several admins run commands from console simultaneously, one operator's paste could use the wrong schematic.
+
+### Entity Resume Relies On Count-Based Skipping
+
+- Entity resume currently skips the first `entitiesApplied` entries from the schematic entity list on restart.
+- That is good enough for sequential spawn order, but it is less explicit than per-entity persisted checkpoints.
+- If future entity logic becomes more complex, this may deserve a stronger persistence model.
 
 ### Large Exact Jobs Produce Very High Queue Pressure
 
@@ -92,6 +118,19 @@ This file tracks bugs, rough edges, and implementation risks that are currently 
 - There is no hybrid mode yet that preserves correctness while reducing full-volume cost.
 
 ## Codebase Issues / Technical Debt
+
+### Config Hot-Reload Uses NeoForge Internal Reflection
+
+- `/schem reload` calls `ConfigTracker.loadConfig()` via reflection because NeoForge does not expose a public API for triggering a config reload from commands.
+- If NeoForge renames or removes this internal method in a future update, the reload command will throw an exception at runtime with no compile-time warning.
+- The method signature is verified at call time, so the failure mode is a runtime error rather than a silent wrong-behavior failure.
+
+### `placeableBlocks` Counter Is An `int`
+
+- In `streamPasteIntoJobAsync`, the counter for queued placements and the job's `displayTotalBlocks` / `clearOperationsTotal` fields are all `int`.
+- The default `maxSchematicVolume` of 50,000,000 is safely below `Integer.MAX_VALUE`.
+- If the config is raised to an extreme value (above ~2.1 billion), `Math.toIntExact` will throw `ArithmeticException` at paste time rather than silently overflowing.
+- This is only reachable by deliberately misconfiguring the server.
 
 ### Tick-Side Progress And ETA Logic Is Growing Complex
 
@@ -108,43 +147,46 @@ This file tracks bugs, rough edges, and implementation risks that are currently 
 - Test/build output still shows a deprecation warning about `getProgramArguments()`.
 - This is not breaking today, but it should be cleaned up before future toolchain upgrades.
 
-### Current Job Persistence Model Is In-Memory Only
+### Job Persistence Still Needs More Operator-Facing Diagnostics
 
-- The job model was not originally built around serialization/resume.
-- Adding restart-safe jobs will likely require revisiting job state structure and queue reconstruction.
+- Persistence and cleanup now exist.
+- But there is still no dedicated inspect command that explains why a specific persisted job failed to resume.
+- Today the operator mostly has logs plus `/schem cleanup`.
 
 ## Performance / Design Tradeoff Issues
 
-### Exactness Versus Speed Is Not Yet Exposed As A First-Class User Choice
+### `replace` Paste Mode Still Does Not Exist
 
-- Right now the current exact behavior favors correctness.
-- Users do not yet have a clear command-level choice between:
-  - exact full-volume clear
-  - faster non-air-only placement
-  - other future replacement modes
+- `exact` and `fast` are now explicit first-class modes.
+- The remaining mode gap is `replace`, which would place schematic air as authored instead of using the current exact/fast behaviors.
 
 ### Block Entity And Entity Handling Need More Production Hardening
 
-- Block entity placement exists, but long-job reliability around chunk boundaries and pause/resume scenarios needs more hardening.
-- Entity handling is not yet a major validated part of the current workflow.
+- Block entity placement exists, but long-job reliability around chunk boundaries and pause/resume scenarios still needs more hardening.
+- Entity handling is now implemented, but it is not yet a major validated part of the workflow.
 
 ## Suggested Priority Order
 
 ### High Priority
 
-- real cancel rollback
-- persisted job resume after restart
-- richer `/schem info` and planning before paste
-- command-level job targeting and control
+- hard-enforce `chunkRadiusLimit`
+- add `replace` paste mode
+- improve persisted-job diagnostics beyond cleanup
+- better bounds/anchor surfacing in active job inspection
 
 ### Medium Priority
 
 - more stable and more explainable ETA
-- explicit paste modes
+- entity rollback support
+- explicit `replace` mode
 - improved status clarity for large jobs
+- protection/overlap warnings in `/schem plan`
 
 ### Lower Priority
 
+- legacy `.schematic` format support
+- multi-console session isolation
 - extra admin utilities
 - reconnect-aware HUD quality improvements
 - cleanup of build/deprecation warnings
+- replace `reloadConfig` reflection with a public NeoForge API when one becomes available

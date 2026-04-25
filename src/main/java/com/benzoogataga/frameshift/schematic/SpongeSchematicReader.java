@@ -14,7 +14,9 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 // Reads read-only metadata from Sponge .schem files without parsing block payloads.
@@ -52,7 +54,8 @@ public class SpongeSchematicReader implements SchematicReader {
             throw new IOException("Schematic file is empty: " + file.getFileName());
         }
 
-        ParsedSchematic parsed = parseStructure(root, file, fileSize, true);
+        ParsedSchematic parsed = parseStructure(root, file, fileSize, true, false);
+        long nonAirBlocks = countNonAirBlocks(parsed.data, parsed.airPaletteIds, parsed.volume());
 
         return new SchematicMetadata(
             stemOf(file.getFileName().toString()),
@@ -66,7 +69,7 @@ public class SpongeSchematicReader implements SchematicReader {
             parsed.offsetZ,
             fileSize,
             parsed.dataVersion,
-            -1L,
+            nonAirBlocks,
             parsed.blockEntityCount,
             parsed.entityCount
         );
@@ -88,8 +91,31 @@ public class SpongeSchematicReader implements SchematicReader {
             throw new IOException("Schematic file is empty: " + file.getFileName());
         }
 
-        ParsedSchematic parsed = parseStructure(root, file, fileSize, options.includeBlockEntities);
+        ParsedSchematic parsed = parseStructure(root, file, fileSize, options.includeBlockEntities, false);
         return new SpongeBlockStream(parsed, options);
+    }
+
+    @Override
+    public List<CompoundTag> readEntities(Path file, SchematicReadOptions options) throws IOException {
+        if (!options.includeEntities) {
+            return List.of();
+        }
+        if (!Files.isRegularFile(file) || !Files.isReadable(file)) {
+            throw new IOException("Schematic file is not readable: " + file);
+        }
+
+        long fileSize = Files.size(file);
+        if (fileSize > maxCompressedBytes) {
+            throw new IOException("Schematic file exceeds metadata read limit: " + file.getFileName());
+        }
+
+        CompoundTag root = NbtIo.readCompressed(file, NbtAccounter.unlimitedHeap());
+        if (root == null) {
+            throw new IOException("Schematic file is empty: " + file.getFileName());
+        }
+
+        ParsedSchematic parsed = parseStructure(root, file, fileSize, false, true);
+        return parsed.entities;
     }
 
     // Reads a required int field and fails with a clear message when missing.
@@ -134,7 +160,13 @@ public class SpongeSchematicReader implements SchematicReader {
         return dot > 0 ? fileName.substring(0, dot) : fileName;
     }
 
-    private ParsedSchematic parseStructure(CompoundTag root, Path file, long fileSize, boolean includeBlockEntities) throws IOException {
+    private ParsedSchematic parseStructure(
+        CompoundTag root,
+        Path file,
+        long fileSize,
+        boolean includeBlockEntities,
+        boolean includeEntities
+    ) throws IOException {
         CompoundTag schematic = root;
         SchematicFormat format;
         int version;
@@ -168,11 +200,13 @@ public class SpongeSchematicReader implements SchematicReader {
         ListTag blockEntityList = format == SchematicFormat.SPONGE_V3
             ? blockContainer.getList("BlockEntities", Tag.TAG_COMPOUND)
             : schematic.getList("BlockEntities", Tag.TAG_COMPOUND);
+        ListTag entityList = schematic.getList("Entities", Tag.TAG_COMPOUND);
         Map<Integer, String> paletteById = invertPalette(palette);
-        Map<Integer, CompoundTag> blockEntities = readBlockEntities(
+        Map<Long, CompoundTag> blockEntities = readBlockEntities(
             blockEntityList,
             includeBlockEntities
         );
+        List<CompoundTag> entities = readEntities(entityList, includeEntities);
         int[] airPaletteIds = resolveAirPaletteIds(palette);
 
         return new ParsedSchematic(
@@ -191,6 +225,7 @@ public class SpongeSchematicReader implements SchematicReader {
             data,
             paletteById,
             blockEntities,
+            entities,
             airPaletteIds
         );
     }
@@ -229,32 +264,47 @@ public class SpongeSchematicReader implements SchematicReader {
         return new int[] { 0, 0, 0 };
     }
 
-    private static Map<Integer, CompoundTag> readBlockEntities(ListTag list, boolean includeBlockEntities) {
+    private static Map<Long, CompoundTag> readBlockEntities(ListTag list, boolean includeBlockEntities) {
         if (!includeBlockEntities) {
             return Map.of();
         }
 
-        Map<Integer, CompoundTag> byIndex = new HashMap<>();
+        Map<Long, CompoundTag> byIndex = new HashMap<>();
         for (Tag element : list) {
             if (!(element instanceof CompoundTag blockEntity)) {
                 continue;
             }
-            int index = relativeIndex(blockEntity);
+            long index = relativeIndex(blockEntity);
             byIndex.put(index, blockEntity.copy());
         }
         return byIndex;
     }
 
-    private static int relativeIndex(CompoundTag blockEntity) {
+    private static List<CompoundTag> readEntities(ListTag list, boolean includeEntities) {
+        if (!includeEntities) {
+            return List.of();
+        }
+
+        List<CompoundTag> entities = new ArrayList<>();
+        for (Tag element : list) {
+            if (element instanceof CompoundTag entity) {
+                entities.add(entity.copy());
+            }
+        }
+        return entities;
+    }
+
+    private static long relativeIndex(CompoundTag blockEntity) {
         int[] pos = blockEntity.getIntArray("Pos");
         if (pos.length == 3) {
             return packPosition(pos[0], pos[1], pos[2]);
         }
-        return Integer.MIN_VALUE;
+        return Long.MIN_VALUE;
     }
 
-    private static int packPosition(int x, int y, int z) {
-        return (x & 0x3FF) << 20 | (y & 0x3FF) << 10 | (z & 0x3FF);
+    // Packs x/y/z into a long using 16 bits per axis, supporting Sponge's full unsigned-short range (0-65534).
+    private static long packPosition(int x, int y, int z) {
+        return ((long) (x & 0xFFFF) << 32) | ((long) (y & 0xFFFF) << 16) | (z & 0xFFFFL);
     }
 
     private static int[] resolveAirPaletteIds(CompoundTag palette) {
@@ -281,11 +331,24 @@ public class SpongeSchematicReader implements SchematicReader {
         return byId;
     }
 
+    private static long countNonAirBlocks(byte[] data, int[] airPaletteIds, long volume) throws IOException {
+        try (InputStream stream = new ByteArrayInputStream(data)) {
+            long nonAirBlocks = 0L;
+            for (long cursor = 0; cursor < volume; cursor++) {
+                int paletteId = SpongeBlockStream.readVarInt(stream);
+                if (!SpongeBlockStream.isAirPaletteId(paletteId, airPaletteIds)) {
+                    nonAirBlocks++;
+                }
+            }
+            return nonAirBlocks;
+        }
+    }
+
     private static final class SpongeBlockStream implements BlockStream {
         private final ParsedSchematic parsed;
         private final SchematicReadOptions options;
         private final InputStream data;
-        private int cursor;
+        private long cursor;
         @Nullable
         private SchematicBlockEntry nextEntry;
 
@@ -303,9 +366,10 @@ public class SpongeSchematicReader implements SchematicReader {
 
             while (cursor < parsed.volume()) {
                 int paletteId = readVarInt(data);
-                int localX = cursor % parsed.sizeX;
-                int localZ = (cursor / parsed.sizeX) % parsed.sizeZ;
-                int localY = cursor / (parsed.sizeX * parsed.sizeZ);
+                long plane = (long) parsed.sizeX * parsed.sizeZ;
+                int localX = (int) (cursor % parsed.sizeX);
+                int localZ = (int) ((cursor / parsed.sizeX) % parsed.sizeZ);
+                int localY = (int) (cursor / plane);
                 cursor++;
 
                 if (options.ignoreAir && isAirPaletteId(paletteId, parsed.airPaletteIds)) {
@@ -395,11 +459,12 @@ public class SpongeSchematicReader implements SchematicReader {
         int offsetZ,
         byte[] data,
         Map<Integer, String> paletteById,
-        Map<Integer, CompoundTag> blockEntities,
+        Map<Long, CompoundTag> blockEntities,
+        List<CompoundTag> entities,
         int[] airPaletteIds
     ) {
-        private int volume() {
-            return sizeX * sizeY * sizeZ;
+        private long volume() {
+            return (long) sizeX * sizeY * sizeZ;
         }
     }
 }

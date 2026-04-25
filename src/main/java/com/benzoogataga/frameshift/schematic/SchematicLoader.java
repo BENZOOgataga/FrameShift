@@ -9,6 +9,10 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.DoubleTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.StringTag;
+import net.minecraft.nbt.Tag;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.FallingBlock;
 import net.minecraft.world.level.block.Blocks;
@@ -26,6 +30,7 @@ import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -119,7 +124,7 @@ public final class SchematicLoader {
 
     // Returns distinct schematic name suggestions from supported files in configured directories.
     public List<String> suggestNames(Path serverRoot) {
-        List<String> suggestions = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
         List<String> schematicDirectories = configuredDirectories();
 
         for (String directoryName : schematicDirectories) {
@@ -133,15 +138,14 @@ public final class SchematicLoader {
                     .filter(Files::isRegularFile)
                     .filter(path -> findReader(path).isPresent())
                     .map(path -> stemOf(path.getFileName().toString()))
-                    .filter(name -> !suggestions.contains(name))
                     .sorted(String.CASE_INSENSITIVE_ORDER)
-                    .forEach(suggestions::add);
+                    .forEach(seen::add);
             } catch (IOException exception) {
                 FrameShift.LOGGER.warn("Could not gather schematic suggestions from {}: {}", directory, exception.getMessage());
             }
         }
 
-        return suggestions;
+        return new ArrayList<>(seen);
     }
 
     // Parses and resolves a schematic into concrete block placements off the server thread.
@@ -221,21 +225,18 @@ public final class SchematicLoader {
                 SchematicMetadata metadata = reader.readMetadata(file);
                 Map<String, BlockState> parsedStates = new HashMap<>();
                 HolderLookup.RegistryLookup<net.minecraft.world.level.block.Block> blockLookup = level.registryAccess().lookupOrThrow(Registries.BLOCK);
-                int placeableBlocks = 0;
 
-                try (BlockStream countStream = reader.openBlockStream(file, options)) {
-                    while (countStream.hasNext()) {
-                        if (job.state == SchematicPasteJob.State.CANCELLED || job.state == SchematicPasteJob.State.FAILED) {
-                            break;
-                        }
-                        countStream.next();
-                        placeableBlocks++;
-                    }
+                // Set a rough upper-bound for the HUD before streaming begins; updated to the exact
+                // count after the single enqueue pass completes.
+                long clearOps = job.skipClear ? 0L : metadata.volume();
+                job.clearOperationsTotal = (int) Math.min(clearOps, Integer.MAX_VALUE);
+                if (metadata.nonAirBlocks >= 0L) {
+                    job.displayTotalBlocks = (int) Math.min(metadata.nonAirBlocks, Integer.MAX_VALUE);
+                    job.expectedTotalBlocks = (int) Math.min(clearOps + metadata.nonAirBlocks, Integer.MAX_VALUE);
+                } else {
+                    job.displayTotalBlocks = -1;
+                    job.expectedTotalBlocks = -1;
                 }
-
-                job.expectedTotalBlocks = Math.toIntExact((job.skipClear ? 0L : metadata.volume()) + placeableBlocks);
-                job.displayTotalBlocks = placeableBlocks;
-                job.clearOperationsTotal = job.skipClear ? 0 : Math.toIntExact(metadata.volume());
 
                 if (!job.skipClear) {
                     // Clear the full schematic bounds from metadata so every position inside the volume is reset,
@@ -246,9 +247,12 @@ public final class SchematicLoader {
                     job.placePhaseStartedAtNanos = System.nanoTime();
                 }
 
+                int placeableBlocks = 0;
                 try (BlockStream stream = reader.openBlockStream(file, options)) {
                     while (stream.hasNext()) {
-                        if (job.state == SchematicPasteJob.State.CANCELLED || job.state == SchematicPasteJob.State.FAILED) {
+                        if (job.state == SchematicPasteJob.State.CANCELLED
+                            || job.state == SchematicPasteJob.State.FAILED
+                            || job.rollbackMode) {
                             break;
                         }
 
@@ -272,7 +276,22 @@ public final class SchematicLoader {
                         } else {
                             job.enqueuePlacement(task);
                         }
+                        placeableBlocks++;
                     }
+                }
+
+                // Now that we have the exact count, update the display total for accurate progress.
+                job.displayTotalBlocks = placeableBlocks;
+                job.expectedTotalBlocks = (int) Math.min(clearOps + placeableBlocks, Integer.MAX_VALUE);
+
+                int entityIndex = 0;
+                for (CompoundTag entityTag : reader.readEntities(file, options)) {
+                    if (entityIndex++ < job.entitiesApplied) {
+                        continue;
+                    }
+                    job.entityQueue.addLast(new SchematicPasteJob.EntityTask(
+                        normalizeEntityTag(entityTag, job.origin)
+                    ));
                 }
 
                 if (!invalidStateIds.isEmpty()) {
@@ -477,7 +496,153 @@ public final class SchematicLoader {
         normalized.remove("Pos");
         normalized.remove("Id");
         normalized.remove("Data");
+        return sanitizeBlockEntityTag(normalized);
+    }
+
+    private static CompoundTag sanitizeBlockEntityTag(CompoundTag normalized) {
+        String id = normalized.getString("id");
+        if (id.endsWith("sign")) {
+            sanitizeSignTag(normalized);
+        }
         return normalized;
+    }
+
+    private static CompoundTag normalizeEntityTag(CompoundTag schematicTag, BlockPos origin) {
+        CompoundTag normalized = schematicTag.copy();
+        normalizeEntityPosition(normalized, origin);
+        stripEntityIdentity(normalized);
+        return normalized;
+    }
+
+    private static void normalizeEntityPosition(CompoundTag tag, BlockPos origin) {
+        if (tag.contains("Pos", Tag.TAG_LIST)) {
+            ListTag pos = tag.getList("Pos", Tag.TAG_DOUBLE);
+            if (pos.size() >= 3) {
+                ListTag normalizedPos = new ListTag();
+                normalizedPos.add(DoubleTag.valueOf(pos.getDouble(0) + origin.getX()));
+                normalizedPos.add(DoubleTag.valueOf(pos.getDouble(1) + origin.getY()));
+                normalizedPos.add(DoubleTag.valueOf(pos.getDouble(2) + origin.getZ()));
+                tag.put("Pos", normalizedPos);
+            }
+        }
+
+        if (tag.contains("TileX", Tag.TAG_INT)) {
+            tag.putInt("TileX", tag.getInt("TileX") + origin.getX());
+        }
+        if (tag.contains("TileY", Tag.TAG_INT)) {
+            tag.putInt("TileY", tag.getInt("TileY") + origin.getY());
+        }
+        if (tag.contains("TileZ", Tag.TAG_INT)) {
+            tag.putInt("TileZ", tag.getInt("TileZ") + origin.getZ());
+        }
+        if (tag.contains("FacingTileX", Tag.TAG_INT)) {
+            tag.putInt("FacingTileX", tag.getInt("FacingTileX") + origin.getX());
+        }
+        if (tag.contains("FacingTileY", Tag.TAG_INT)) {
+            tag.putInt("FacingTileY", tag.getInt("FacingTileY") + origin.getY());
+        }
+        if (tag.contains("FacingTileZ", Tag.TAG_INT)) {
+            tag.putInt("FacingTileZ", tag.getInt("FacingTileZ") + origin.getZ());
+        }
+    }
+
+    private static void stripEntityIdentity(CompoundTag tag) {
+        tag.remove("UUID");
+        tag.remove("UUIDMost");
+        tag.remove("UUIDLeast");
+        if (tag.contains("Passengers", Tag.TAG_LIST)) {
+            ListTag passengers = tag.getList("Passengers", Tag.TAG_COMPOUND);
+            for (Tag passenger : passengers) {
+                if (passenger instanceof CompoundTag passengerTag) {
+                    stripEntityIdentity(passengerTag);
+                }
+            }
+        }
+    }
+
+    private static void sanitizeSignTag(CompoundTag tag) {
+        CompoundTag frontText = sanitizeSignText(tag.getCompound("front_text"), true, tag);
+        CompoundTag backText = sanitizeSignText(tag.getCompound("back_text"), false, tag);
+        tag.put("front_text", frontText);
+        tag.put("back_text", backText);
+        tag.remove("Text1");
+        tag.remove("Text2");
+        tag.remove("Text3");
+        tag.remove("Text4");
+        tag.remove("FilteredText1");
+        tag.remove("FilteredText2");
+        tag.remove("FilteredText3");
+        tag.remove("FilteredText4");
+        tag.remove("Color");
+        tag.remove("GlowingText");
+    }
+
+    private static CompoundTag sanitizeSignText(CompoundTag textTag, boolean front, CompoundTag source) {
+        CompoundTag sanitized = new CompoundTag();
+        ListTag messages = sanitizeSignLines(rawList(textTag, "messages"), front, source, false);
+        sanitized.put("messages", messages);
+        ListTag filtered = sanitizeOptionalSignLines(rawList(textTag, "filtered_messages"), messages);
+        if (!filtered.isEmpty()) {
+            sanitized.put("filtered_messages", filtered);
+        }
+
+        String color = textTag.contains("color", Tag.TAG_STRING) ? textTag.getString("color") : source.getString("Color");
+        sanitized.putString("color", color.isBlank() ? "black" : color.toLowerCase(Locale.ROOT));
+        sanitized.putBoolean(
+            "has_glowing_text",
+            textTag.contains("has_glowing_text", Tag.TAG_BYTE) ? textTag.getBoolean("has_glowing_text") : source.getBoolean("GlowingText")
+        );
+        return sanitized;
+    }
+
+    private static ListTag rawList(CompoundTag tag, String key) {
+        Tag raw = tag.get(key);
+        return raw instanceof ListTag list ? list : new ListTag();
+    }
+
+    private static ListTag sanitizeSignLines(ListTag existing, boolean front, CompoundTag source, boolean filtered) {
+        ListTag sanitized = new ListTag();
+        for (int index = 0; index < 4; index++) {
+            Tag line = index < existing.size() ? existing.get(index) : legacySignLine(front, source, index, filtered);
+            sanitized.add(sanitizeSignLine(line));
+        }
+        return sanitized;
+    }
+
+    private static ListTag sanitizeOptionalSignLines(ListTag existing, ListTag fallback) {
+        if (existing.isEmpty()) {
+            return copyStringLikeList(fallback);
+        }
+        ListTag sanitized = new ListTag();
+        for (int index = 0; index < 4; index++) {
+            Tag line = index < existing.size() ? existing.get(index) : fallback.get(index);
+            sanitized.add(sanitizeSignLine(line));
+        }
+        return sanitized;
+    }
+
+    private static ListTag copyStringLikeList(ListTag source) {
+        ListTag copy = new ListTag();
+        for (int index = 0; index < 4; index++) {
+            copy.add(sanitizeSignLine(index < source.size() ? source.get(index) : null));
+        }
+        return copy;
+    }
+
+    @Nullable
+    private static Tag legacySignLine(boolean front, CompoundTag source, int index, boolean filtered) {
+        if (!front) {
+            return null;
+        }
+        String key = (filtered ? "FilteredText" : "Text") + (index + 1);
+        return source.contains(key, Tag.TAG_STRING) ? StringTag.valueOf(source.getString(key)) : null;
+    }
+
+    private static Tag sanitizeSignLine(@Nullable Tag line) {
+        if (line instanceof StringTag || line instanceof CompoundTag || line instanceof ListTag) {
+            return line.copy();
+        }
+        return StringTag.valueOf("");
     }
 
     private static void enqueueClearVolume(SchematicPasteJob job, SchematicMetadata metadata) throws InterruptedException {
@@ -485,7 +650,9 @@ public final class SchematicLoader {
         for (int y = metadata.sizeY - 1; y >= 0; y--) {
             for (int z = 0; z < metadata.sizeZ; z++) {
                 for (int x = 0; x < metadata.sizeX; x++) {
-                    if (job.state == SchematicPasteJob.State.CANCELLED || job.state == SchematicPasteJob.State.FAILED) {
+                    if (job.state == SchematicPasteJob.State.CANCELLED
+                        || job.state == SchematicPasteJob.State.FAILED
+                        || job.rollbackMode) {
                         return;
                     }
 

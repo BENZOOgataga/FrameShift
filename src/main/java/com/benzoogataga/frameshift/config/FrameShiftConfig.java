@@ -58,6 +58,18 @@ public class FrameShiftConfig {
     // Caps the number of entries returned by one /schem list page.
     public static ModConfigSpec.IntValue maxListResults;
 
+    // Automatically resume persisted jobs when the server starts
+    public static ModConfigSpec.BooleanValue autoResumeJobs;
+
+    // Max bytes of rollback snapshot data allowed for one job directory.
+    public static ModConfigSpec.LongValue maxRollbackSnapshotBytesPerJob;
+
+    // Max bytes of rollback snapshot data allowed across all persisted jobs.
+    public static ModConfigSpec.LongValue maxTotalRollbackStorageBytes;
+
+    // Max number of persisted job directories allowed at once.
+    public static ModConfigSpec.IntValue maxPersistedRollbackJobs;
+
     // Called from FrameShift constructor; builds the config spec and registers the file.
     public static void register(ModContainer container) {
         ModConfigSpec.Builder builder = new ModConfigSpec.Builder();
@@ -104,7 +116,34 @@ public class FrameShiftConfig {
             .defineInRange("maxListResults", 100, 1, 1000);
         builder.pop();
 
+        builder.push("jobs");
+        autoResumeJobs = builder
+            .comment("Automatically resume paused jobs when the server restarts")
+            .define("autoResumeJobs", true);
+        maxRollbackSnapshotBytesPerJob = builder
+            .comment("Max rollback snapshot bytes allowed for one job")
+            .defineInRange("maxRollbackSnapshotBytesPerJob", 256_000_000L, 1L, Long.MAX_VALUE);
+        maxTotalRollbackStorageBytes = builder
+            .comment("Max rollback snapshot bytes allowed across all jobs")
+            .defineInRange("maxTotalRollbackStorageBytes", 1_000_000_000L, 1L, Long.MAX_VALUE);
+        maxPersistedRollbackJobs = builder
+            .comment("Max persisted job directories allowed for rollback and restart resume")
+            .defineInRange("maxPersistedRollbackJobs", 50, 1, 10_000);
+        builder.pop();
+
         ModConfigSpec spec = builder.build();
         container.registerConfig(ModConfig.Type.SERVER, spec);
+    }
+
+    // Returns the fraction of max throughput to use given current server MSPT.
+    // 0.0 means fully paused; used identically by TickHandler and status/ETA displays.
+    public static double throttleFactor(double mspt) {
+        if (!adaptiveThrottling.get()) {
+            return 1.0D;
+        }
+        if (mspt < 35.0D) return 1.0D;
+        if (mspt < 45.0D) return 0.5D;
+        if (mspt < 50.0D) return 0.25D;
+        return 0.0D;
     }
 }
