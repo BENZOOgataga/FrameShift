@@ -14,6 +14,7 @@ import com.benzoogataga.frameshift.schematic.SchematicReadOptions;
 import com.mojang.brigadier.Command;
 import com.mojang.brigadier.arguments.FloatArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.suggestion.Suggestions;
 import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 import net.minecraft.ChatFormatting;
@@ -82,6 +83,8 @@ public class SchemCommand {
                         ))))
                 .then(Commands.literal("plan")
                     .executes(context -> executePlanLoaded(context.getSource(), null, false))
+                    .then(planModeLiteral("exact", false))
+                    .then(planModeLiteral("fast", true))
                     .then(Commands.literal("no-clear")
                         .executes(context -> executePlanLoaded(context.getSource(), null, true)))
                     .then(Commands.argument("pos", BlockPosArgument.blockPos())
@@ -98,6 +101,8 @@ public class SchemCommand {
                             )))))
                 .then(Commands.literal("paste")
                     .executes(context -> executePasteLoaded(context.getSource(), loader, null, false, false))
+                    .then(pasteModeLiteral(loader, "exact", false))
+                    .then(pasteModeLiteral(loader, "fast", true))
                     .then(Commands.literal("freeze-gravity")
                         .executes(context -> executePasteLoaded(context.getSource(), loader, null, false, false, true))
                         .then(Commands.literal("debug")
@@ -383,7 +388,7 @@ public class SchemCommand {
         source.sendSuccess(() -> SchemMessages.info("Streaming " + loaded.name + "..."), false);
         if (skipClear) {
             source.sendSuccess(() -> SchemMessages.warning(
-                "No-clear mode is faster, but not safe: old world blocks, air gaps, and unsupported/falling blocks may remain inside the pasted area."
+                "Fast mode is faster, but not safe: old world blocks, air gaps, and unsupported/falling blocks may remain inside the pasted area."
             ), false);
         }
         if (freezeGravity) {
@@ -442,6 +447,62 @@ public class SchemCommand {
         BlockPos origin = explicitPos != null ? explicitPos : player.blockPosition();
         sendPlanResult(source, buildPlanPreview(loaded.metadata, origin, skipClear));
         return Command.SINGLE_SUCCESS;
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> planModeLiteral(String name, boolean skipClear) {
+        return Commands.literal(name)
+            .executes(context -> executePlanLoaded(context.getSource(), null, skipClear))
+            .then(Commands.argument("pos", BlockPosArgument.blockPos())
+                .executes(context -> executePlanLoaded(
+                    context.getSource(),
+                    BlockPosArgument.getLoadedBlockPos(context, "pos"),
+                    skipClear
+                )));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> pasteModeLiteral(SchematicLoader loader, String name, boolean skipClear) {
+        return Commands.literal(name)
+            .executes(context -> executePasteLoaded(context.getSource(), loader, null, false, skipClear))
+            .then(Commands.literal("freeze-gravity")
+                .executes(context -> executePasteLoaded(context.getSource(), loader, null, false, skipClear, true))
+                .then(Commands.literal("debug")
+                    .executes(context -> executePasteLoaded(context.getSource(), loader, null, true, skipClear, true))))
+            .then(Commands.literal("debug")
+                .executes(context -> executePasteLoaded(context.getSource(), loader, null, true, skipClear)))
+            .then(Commands.argument("pos", BlockPosArgument.blockPos())
+                .executes(context -> executePasteLoaded(
+                    context.getSource(),
+                    loader,
+                    BlockPosArgument.getLoadedBlockPos(context, "pos"),
+                    false,
+                    skipClear
+                ))
+                .then(Commands.literal("freeze-gravity")
+                    .executes(context -> executePasteLoaded(
+                        context.getSource(),
+                        loader,
+                        BlockPosArgument.getLoadedBlockPos(context, "pos"),
+                        false,
+                        skipClear,
+                        true
+                    ))
+                    .then(Commands.literal("debug")
+                        .executes(context -> executePasteLoaded(
+                            context.getSource(),
+                            loader,
+                            BlockPosArgument.getLoadedBlockPos(context, "pos"),
+                            true,
+                            skipClear,
+                            true
+                        ))))
+                .then(Commands.literal("debug")
+                    .executes(context -> executePasteLoaded(
+                        context.getSource(),
+                        loader,
+                        BlockPosArgument.getLoadedBlockPos(context, "pos"),
+                        true,
+                        skipClear
+                    ))));
     }
 
     private static void sendListResult(CommandSourceStack source, SchematicListResult result) {
@@ -513,7 +574,7 @@ public class SchemCommand {
         ), false);
         source.sendSuccess(() -> SchemMessages.field(
             "Paste mode",
-            plan.skipClear ? "no-clear" : "exact",
+            pasteModeName(plan.skipClear),
             plan.skipClear ? ChatFormatting.YELLOW : ChatFormatting.WHITE
         ), false);
         source.sendSuccess(() -> SchemMessages.field("Volume", formatCountLong(plan.volume), ChatFormatting.WHITE), false);
@@ -800,6 +861,10 @@ public class SchemCommand {
         if (count < 1_000_000L) return String.format(Locale.ROOT, "%.1fK", count / 1_000.0);
         if (count < 1_000_000_000L) return String.format(Locale.ROOT, "%.2fM", count / 1_000_000.0);
         return String.format(Locale.ROOT, "%.2fB", count / 1_000_000_000.0);
+    }
+
+    private static String pasteModeName(boolean skipClear) {
+        return skipClear ? "fast" : "exact";
     }
 
     private static String formatFileSize(long bytes) {
