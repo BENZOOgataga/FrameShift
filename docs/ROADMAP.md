@@ -17,9 +17,11 @@ This roadmap mixes requested features with adjacent work needed to make them saf
 - `/schem list` with cursor-based pagination
 - `/schem info <name>` - dimensions, offset, volume, file size, data version, block entity / entity counts
 - `/schem load <name>` - loads schematic into a per-player session for paste
-- `/schem paste` - streams schematic directly into a bounded job queue; supports `freeze-gravity`, `no-clear`, `debug` flags and an optional target position
+- `/schem paste` - streams schematic directly into a bounded job queue; supports explicit `exact` / `fast` modes, legacy `no-clear`, `freeze-gravity`, `debug`, and an optional target position
+- `/schem plan` - dry-run preview of bounds, chunk span, clear/place counts, and ETA from the loaded schematic
 - `/schem status` - phase, percentage, queued block count, blocks placed / unchanged / failed, ETA
-- `/schem cancel <jobId>` - cancels a running or paused job (no rollback yet - see Near Term)
+- `/schem cancel <jobId>` - starts throttled rollback and restores previously touched blocks when possible
+- `/schem cleanup` - previews stale/corrupt persisted job directories, with `/schem cleanup apply` to prune them
 - `/schem reload` - hot-reloads config
 - `/flyspeed [value]` and `/flyspeed reset` - admin fly-speed utility with clamped range
 
@@ -32,6 +34,14 @@ This roadmap mixes requested features with adjacent work needed to make them saf
 - **`suggestNames` O(n²) deduplication** - replaced `ArrayList.contains()` with a `LinkedHashSet` for O(1) per-entry dedup.
 - **Duplicate `throttleFactor`** - identical method existed in both `TickHandler` and `SchemCommand`. Extracted to `FrameShiftConfig.throttleFactor(mspt)`.
 - **Dead code** - `enqueueNormalPlacement()` was an unreachable duplicate of `enqueuePlacement()`. Removed.
+- **Shared forward queue cap** - normal and gravity placements now share one bounded capacity budget, so gravity-heavy schematics cannot grow an unbounded queue in memory.
+- **Reconnect-aware HUD** - jobs continue independently of player presence and reattach compact HUD/status messaging when the starter reconnects.
+- **Persisted restart resume** - running, paused, and rollback jobs now persist to disk on graceful stop and resume on startup when enabled.
+- **Rollback persistence** - cancel rollback survives graceful restart and preserves later external edits by skipping conflicted positions.
+- **Planning preview** - `/schem plan` now reports bounds, chunk span, operation counts, and full-speed ETA before paste start.
+- **Explicit paste modes** - `exact` and `fast` are now first-class command-level choices instead of only implicit flag combinations.
+- **Entity pasting** - schematic entities are now read, normalized into world space, spawned under a tick budget, and resumed safely after graceful restart.
+- **Malformed sign hardening** - malformed sign block-entity text is sanitized at import time to avoid console spam during paste.
 
 ---
 
@@ -39,32 +49,23 @@ This roadmap mixes requested features with adjacent work needed to make them saf
 
 ### Job Control
 
-- `/schem cancel <jobId>` should restore the world to the state it had before the job started.
 - Any admin with permission should be able to cancel a job started by another admin.
 - `/schem status` should expose stable job IDs and enough metadata to target the correct job quickly.
 - ~~Add `/schem pause <jobId>` and `/schem resume <jobId>` for explicit operator control.~~ ✓ done
-- Add `/schem status <jobId>` for a focused view of one job.
+- `/schem bounds <jobId>` would still help operators reason about an active paste more quickly.
 
 ### Safer Cancellation / Rollback
 
-- Introduce per-job undo snapshots so cancel can revert blocks already cleared or placed.
-- Rollback should include block states and block entities.
-- Rollback should run as a throttled job, not as one huge synchronous revert.
+- ~~Introduce per-job undo snapshots so cancel can revert blocks already cleared or placed.~~ done
+- ~~Rollback should include block states and block entities.~~ done
+- ~~Rollback should run as a throttled job, not as one huge synchronous revert.~~ done
 - Add a config limit for maximum rollback history size to avoid unbounded disk and memory growth.
 
 ### Better Schematic Info
 
-- `/schem info <name>` should show:
-  - dimensions
-  - schematic offset
-  - non-air block count
-  - full volume
-  - estimated clear operations for the current paste anchor
-  - estimated placement operations
-  - rough ETA based on current config and server load
-- Add a variant that evaluates info against a target position, for example:
-  - `/schem info <name> <x> <y> <z>`
-- Show computed world bounds so admins can verify where the schematic will land before pasting.
+- `/schem info <name>` should remain focused on file metadata.
+- `/schem plan` is now the anchor-aware surface for bounds, chunk span, clear/place counts, and ETA.
+- Add overlap or protected-region warnings to planning output later.
 
 ### Flight Utility
 
@@ -77,29 +78,25 @@ This roadmap mixes requested features with adjacent work needed to make them saf
 
 ### Player Independence
 
-- Paste jobs should continue if the command executor disconnects.
-- HUD display should stop when the player leaves, but the job should keep running.
-- If the player reconnects, FrameShift should be able to resume sending that player job HUD updates for jobs they started.
+- ~~Paste jobs should continue if the command executor disconnects.~~ done
+- ~~HUD display should stop when the player leaves, but the job should keep running.~~ done
+- ~~If the player reconnects, FrameShift should be able to resume sending that player job HUD updates for jobs they started.~~ done
 
 ### Restart Recovery
 
-- Persist running jobs to disk.
-- On graceful shutdown:
-  - pause active jobs
-  - flush queue state and metadata to disk
-- On startup:
-  - reload paused jobs
-  - wait until server performance is stable
-  - resume jobs automatically if configured
-- Persist enough state to resume both clearing and placing phases.
-- Persist progress counters, phase, origin, schematic path, flags, and rollback data.
+- ~~Persist running jobs to disk.~~ done
+- ~~On graceful shutdown: flush queue state and metadata to disk.~~ done
+- ~~On startup: reload jobs and resume automatically if configured.~~ done
+- ~~Persist enough state to resume both clearing and placing phases.~~ done
+- ~~Persist progress counters, phase, origin, schematic path, flags, and rollback data.~~ done
+- Add an admin workflow to inspect why a persisted job failed to resume, not just clean it up.
 
 ### Crash Tolerance
 
 - Design job snapshots so unexpected crashes still leave a recoverable state.
 - Add integrity checks for persisted job files.
-- Mark corrupted jobs clearly and avoid auto-resuming them blindly.
-- Provide an admin command to inspect or discard broken persisted jobs.
+- ~~Mark corrupted jobs clearly and avoid auto-resuming them blindly.~~ done
+- ~~Provide an admin command to inspect or discard broken persisted jobs.~~ done via `/schem cleanup`
 
 ## Scheduling and Automation
 
@@ -133,15 +130,8 @@ This roadmap mixes requested features with adjacent work needed to make them saf
 
 ### Preview / Validation
 
-- Add a dry-run command:
-  - `/schem plan <name> [x y z]`
-- The plan should report:
-  - bounds
-  - volume
-  - non-air blocks
-  - estimated clear ops
-  - estimated runtime
-  - chunk span
+- ~~Add a dry-run command: `/schem plan`~~ done
+- ~~The plan should report bounds, volume, non-air blocks, estimated clear ops, estimated runtime, and chunk span.~~ done
 - Add overlap warnings if the paste would affect protected or sensitive areas later on.
 
 ### Better Messaging
@@ -160,11 +150,9 @@ This roadmap mixes requested features with adjacent work needed to make them saf
 
 ### Paste Modes
 
-- Support explicit paste modes instead of one hidden behavior:
-  - `exact`: full-volume clear, then place non-air
-  - `fast`: place non-air only
-  - `replace`: place all blocks including schematic air
-- Show the expected operation count before starting each mode.
+- ~~Support explicit paste modes instead of one hidden behavior: `exact` and `fast`.~~ done
+- Add `replace`: place all blocks including schematic air
+- ~~Show the expected operation count before starting each mode.~~ done via `/schem plan`
 
 ### Chunk-Aware Work
 
@@ -183,7 +171,7 @@ This roadmap mixes requested features with adjacent work needed to make them saf
 - `/schem bounds <jobId>` to display active world-space bounds.
 - `/schem tp <jobId>` to teleport an admin to a job anchor or center.
 - `/schem retry <jobId>` for paused or failed jobs that are still recoverable.
-- `/schem cleanup` to prune abandoned persisted job files.
+- ~~`/schem cleanup` to prune abandoned persisted job files.~~ done
 
 ## Configuration Expansion
 
@@ -219,24 +207,25 @@ This roadmap mixes requested features with adjacent work needed to make them saf
 
 ### Milestone 2: Reliable Recovery
 
-- player disconnect independence
-- persisted paused/running jobs
-- startup resume with stability checks
+- player disconnect independence done
+- persisted paused/running jobs done
+- startup resume with stability checks (partial: resume exists; stability gating still open)
 
 ### Milestone 3: Safe Undo
 
-- rollback snapshots
-- throttled rollback jobs
-- cancel that truly restores pre-job state
+- rollback snapshots done
+- throttled rollback jobs done
+- cancel that truly restores pre-job state done for blocks/block entities/barriers; entity rollback still out of scope
 
 ### Milestone 4: Smarter Planning
 
-- richer `/schem info`
-- dry-run planning
-- estimated clear/place counts and bounds preview
+- richer planning surface mostly done via `/schem plan`
+- dry-run planning done
+- estimated clear/place counts and bounds preview done
 
 ### Milestone 5: Performance Modes
 
-- exact / fast / replace modes
+- exact / fast modes done
+- replace mode
 - better chunk-aware scheduling
 - more stable ETA based on phase and chunk wait behavior
