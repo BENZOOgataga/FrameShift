@@ -86,4 +86,4 @@ Output jar: `build/libs/frameshift-1.0.0.jar`
 
 ---
 
-Made by [BENZOOgataga](https://benzoogataga.com)
+Made by [@BENZOOgataga](https://benzoogataga.com), see [LICENSE](./LICENSE-PUBLIC).
